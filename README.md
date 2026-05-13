@@ -16,8 +16,9 @@ The Stage 1 MVP intentionally stays small: it reads a short symbol list, respect
 - Local `data/logs/collector.log` and per-run JSON summaries under `data/logs/runs/`.
 - Local technical indicator CSV generation from collected OHLCV data.
 - Minimal FRED macro series collection into `data/macro/`.
+- Minimal Finnhub company news collection into `data/news/`.
 
-Not included yet: Alpha Vantage fallback, Finnhub news, Discord alerts, systemd timers, rclone backups, or DuckDB validation.
+Not included yet: Alpha Vantage fallback, Discord alerts, systemd timers, rclone backups, or DuckDB validation.
 
 ## Layout
 
@@ -30,12 +31,14 @@ data/
   indicators/
   logs/
   macro/
+  news/
   ohlcv/
   raw/
   state/
 src/
   config.py
   lock.py
+  finnhub_news.py
   fred.py
   indicators.py
   logging_utils.py
@@ -79,6 +82,24 @@ By default, a symbol that succeeded today is skipped until the next UTC day. Use
 
 
 
+
+## Finnhub company news
+
+After setting a Finnhub API key, collect a small news batch:
+
+```bash
+export FINNHUB_API_KEY="your-finnhub-api-key"
+python -m src.finnhub_news --limit 2 --days-back 7
+```
+
+Use dry-run mode to verify symbol/date selection without API calls:
+
+```bash
+python -m src.finnhub_news --dry-run --limit 2
+```
+
+News CSV files are written to `data/news/FINNHUB_<SYMBOL>.csv`.
+
 ## FRED macro data
 
 After setting a FRED API key, collect a small macro batch:
@@ -118,6 +139,7 @@ Runtime outputs are intentionally ignored by git:
 - `data/ohlcv/` symbol CSV files.
 - `data/indicators/` symbol indicator CSV files.
 - `data/macro/` FRED macro CSV files.
+- `data/news/` Finnhub company news CSV files.
 - `data/state/state.json` and `data/state/collector.lock`.
 - `data/logs/collector.log` and `data/logs/runs/*.json`.
 
