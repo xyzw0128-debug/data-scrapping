@@ -14,8 +14,9 @@ The Stage 1 MVP intentionally stays small: it reads a short symbol list, respect
 - Dry-run mode for testing without API calls.
 - Lock file protection so two collector runs do not overlap.
 - Local `data/logs/collector.log` and per-run JSON summaries under `data/logs/runs/`.
+- Local technical indicator CSV generation from collected OHLCV data.
 
-Not included yet: Alpha Vantage fallback, Finnhub news, FRED macro data, Discord alerts, systemd timers, rclone backups, DuckDB validation, or local technical indicators.
+Not included yet: Alpha Vantage fallback, Finnhub news, FRED macro data, Discord alerts, systemd timers, rclone backups, or DuckDB validation.
 
 ## Layout
 
@@ -24,6 +25,7 @@ config/
   providers.yaml
   symbols.txt
 data/
+  indicators/
   logs/
   ohlcv/
   raw/
@@ -31,6 +33,7 @@ data/
 src/
   config.py
   lock.py
+  indicators.py
   logging_utils.py
   main.py
   rate_limit.py
@@ -70,6 +73,17 @@ python -m src.main --provider twelve_data --force
 
 By default, a symbol that succeeded today is skipped until the next UTC day. Use `--force` only when you intentionally want to re-fetch symbols that already succeeded today. The collector also creates `data/state/collector.lock` during a run to prevent overlapping executions.
 
+
+## Local indicators
+
+After at least one OHLCV CSV exists under `data/ohlcv/`, calculate local indicators without spending API calls:
+
+```bash
+python -m src.indicators --symbol AAPL
+```
+
+Indicator output is written to `data/indicators/<SYMBOL>.csv` and includes SMA 20/50/200, RSI 14, and MACD 12/26/9 columns.
+
 ## Operating principle
 
 A successful run does not mean every symbol was collected. A successful run means the collector processed only what was safe for the current provider budget and saved enough state to continue next time.
@@ -80,6 +94,7 @@ Runtime outputs are intentionally ignored by git:
 
 - `data/raw/` provider JSON responses.
 - `data/ohlcv/` symbol CSV files.
+- `data/indicators/` symbol indicator CSV files.
 - `data/state/state.json` and `data/state/collector.lock`.
 - `data/logs/collector.log` and `data/logs/runs/*.json`.
 
