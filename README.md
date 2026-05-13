@@ -179,6 +179,14 @@ python -m src.validate
 
 The report is written to `data/logs/validation/latest.json`. Add `--fail-on-issues` if you want the command to exit non-zero when issues are found.
 
+Run DuckDB-based validation (optional):
+
+```bash
+python -m src.validate_duckdb
+```
+
+The DuckDB report is written to `data/logs/validation/latest_duckdb.json`.
+
 ## Daily orchestration
 
 Run the full daily flow locally:
