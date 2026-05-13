@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily personal market data collector
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/workspace/data-scrapping
+EnvironmentFile=-/etc/data-scrapping.env
+ExecStart=/workspace/data-scrapping/scripts/run_daily.sh

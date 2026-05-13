@@ -18,8 +18,9 @@ The Stage 1 MVP intentionally stays small: it reads a short symbol list, respect
 - Minimal FRED macro series collection into `data/macro/`.
 - Minimal Finnhub company news collection into `data/news/`.
 - Daily summary and local hardware healthcheck JSON generation.
+- Daily orchestration script and systemd service/timer templates.
 
-Not included yet: Alpha Vantage fallback, systemd timers, rclone backups, or DuckDB validation.
+Not included yet: Alpha Vantage fallback, rclone backups, or DuckDB validation.
 
 ## Layout
 
@@ -144,6 +145,26 @@ The summary is written to `data/logs/daily/<YYYY-MM-DD>.json`. To send the same 
 export DISCORD_WEBHOOK_URL="your-discord-webhook"
 python -m src.summary --send-discord
 ```
+
+
+## Daily orchestration
+
+Run the full daily flow locally:
+
+```bash
+DRY_RUN=1 scripts/run_daily.sh
+```
+
+For a real run, set provider API keys in the environment and leave `DRY_RUN=0`:
+
+```bash
+export TWELVE_DATA_API_KEY="your-twelve-data-key"
+export FRED_API_KEY="your-fred-key"
+export FINNHUB_API_KEY="your-finnhub-key"
+scripts/run_daily.sh
+```
+
+Systemd templates live under `systemd/`. On the Raspberry Pi, copy `systemd/data-scrapping.env.example` to `/etc/data-scrapping.env`, add real keys, adjust paths in the service file if needed, then install the service and timer.
 
 ## Operating principle
 
