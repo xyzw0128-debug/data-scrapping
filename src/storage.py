@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from src.state import utc_now_iso
+from src.state import utc_now_iso, utc_today
 
 
 OHLCV_FIELDS = ["date", "open", "high", "low", "close", "volume"]
@@ -97,6 +97,22 @@ def upsert_ohlcv_csv(data_dir: Path, symbol: str, rows: list[dict[str, str]]) ->
         writer.writeheader()
         for date in sorted(merged):
             writer.writerow(merged[date])
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp_path, path)
+    return path
+
+
+def save_run_summary(data_dir: Path, summary: dict[str, Any]) -> Path:
+    """Save one run summary JSON under data/logs/runs/."""
+    run_dir = data_dir / "logs" / "runs"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    stamp = str(summary.get("finished_at") or utc_now_iso()).replace(":", "").replace("-", "")
+    path = run_dir / f"{utc_today()}_{stamp}.json"
+    tmp_path = path.with_suffix(".json.tmp")
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        json.dump(summary, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(tmp_path, path)
