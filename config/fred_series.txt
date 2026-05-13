@@ -1,0 +1,5 @@
+# One FRED series ID per line. Start small and expand after a few successful runs.
+FEDFUNDS
+DGS10
+UNRATE
+CPIAUCSL

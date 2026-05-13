@@ -15,24 +15,28 @@ The Stage 1 MVP intentionally stays small: it reads a short symbol list, respect
 - Lock file protection so two collector runs do not overlap.
 - Local `data/logs/collector.log` and per-run JSON summaries under `data/logs/runs/`.
 - Local technical indicator CSV generation from collected OHLCV data.
+- Minimal FRED macro series collection into `data/macro/`.
 
-Not included yet: Alpha Vantage fallback, Finnhub news, FRED macro data, Discord alerts, systemd timers, rclone backups, or DuckDB validation.
+Not included yet: Alpha Vantage fallback, Finnhub news, Discord alerts, systemd timers, rclone backups, or DuckDB validation.
 
 ## Layout
 
 ```text
 config/
+  fred_series.txt
   providers.yaml
   symbols.txt
 data/
   indicators/
   logs/
+  macro/
   ohlcv/
   raw/
   state/
 src/
   config.py
   lock.py
+  fred.py
   indicators.py
   logging_utils.py
   main.py
@@ -74,6 +78,24 @@ python -m src.main --provider twelve_data --force
 By default, a symbol that succeeded today is skipped until the next UTC day. Use `--force` only when you intentionally want to re-fetch symbols that already succeeded today. The collector also creates `data/state/collector.lock` during a run to prevent overlapping executions.
 
 
+
+## FRED macro data
+
+After setting a FRED API key, collect a small macro batch:
+
+```bash
+export FRED_API_KEY="your-fred-api-key"
+python -m src.fred --limit 2
+```
+
+Use dry-run mode to verify series selection without API calls:
+
+```bash
+python -m src.fred --dry-run --limit 2
+```
+
+Macro CSV files are written to `data/macro/FRED_<SERIES_ID>.csv`.
+
 ## Local indicators
 
 After at least one OHLCV CSV exists under `data/ohlcv/`, calculate local indicators without spending API calls:
@@ -95,6 +117,7 @@ Runtime outputs are intentionally ignored by git:
 - `data/raw/` provider JSON responses.
 - `data/ohlcv/` symbol CSV files.
 - `data/indicators/` symbol indicator CSV files.
+- `data/macro/` FRED macro CSV files.
 - `data/state/state.json` and `data/state/collector.lock`.
 - `data/logs/collector.log` and `data/logs/runs/*.json`.
 

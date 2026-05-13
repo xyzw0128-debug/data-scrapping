@@ -10,10 +10,12 @@ __pycache__/
 data/raw/**
 data/ohlcv/**
 data/indicators/**
+data/macro/**
 data/state/**
 data/logs/**
 !data/raw/.gitkeep
 !data/ohlcv/.gitkeep
 !data/indicators/.gitkeep
+!data/macro/.gitkeep
 !data/state/.gitkeep
 !data/logs/.gitkeep
