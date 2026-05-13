@@ -1,0 +1,4 @@
+# One symbol per line. Start small and expand after a few successful runs.
+AAPL
+MSFT
+GOOGL
