@@ -20,8 +20,9 @@ The Stage 1 MVP intentionally stays small: it reads a short symbol list, respect
 - Daily summary and local hardware healthcheck JSON generation.
 - Daily orchestration script and systemd service/timer templates.
 - Lightweight CSV validation reports for OHLCV, indicators, macro, and news outputs.
+- Alpha Vantage OHLCV backup collector for conservative fallback use.
 
-Not included yet: Alpha Vantage fallback, rclone backups, or DuckDB-based validation.
+Not included yet: rclone backups or DuckDB-based validation.
 
 ## Layout
 
@@ -39,6 +40,7 @@ data/
   raw/
   state/
 src/
+  alpha_vantage.py
   config.py
   lock.py
   finnhub_news.py
@@ -87,6 +89,22 @@ By default, a symbol that succeeded today is skipped until the next UTC day. Use
 
 
 
+
+
+## Alpha Vantage OHLCV backup
+
+Alpha Vantage is configured as a conservative backup source. It uses `TIME_SERIES_DAILY` with `outputsize=compact`, so treat it as a small fallback/verification collector rather than the main backfill path.
+
+```bash
+export ALPHA_VANTAGE_API_KEY="your-alpha-vantage-key"
+python -m src.alpha_vantage --max-symbols 1
+```
+
+API-free check:
+
+```bash
+python -m src.alpha_vantage --dry-run --max-symbols 1
+```
 
 ## Finnhub company news
 

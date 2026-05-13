@@ -10,7 +10,9 @@ TWELVE_MAX_SYMBOLS="${TWELVE_MAX_SYMBOLS:-5}"
 FRED_LIMIT="${FRED_LIMIT:-2}"
 FINNHUB_LIMIT="${FINNHUB_LIMIT:-2}"
 FINNHUB_DAYS_BACK="${FINNHUB_DAYS_BACK:-7}"
+ALPHA_VANTAGE_MAX_SYMBOLS="${ALPHA_VANTAGE_MAX_SYMBOLS:-2}"
 RUN_TWELVE="${RUN_TWELVE:-1}"
+RUN_ALPHA_VANTAGE="${RUN_ALPHA_VANTAGE:-0}"
 RUN_INDICATORS="${RUN_INDICATORS:-1}"
 RUN_FRED="${RUN_FRED:-1}"
 RUN_FINNHUB="${RUN_FINNHUB:-1}"
@@ -29,6 +31,11 @@ log_step() {
 if [[ "$RUN_TWELVE" == "1" ]]; then
   log_step "Collecting Twelve Data OHLCV"
   "$PYTHON_BIN" -m src.main --provider twelve_data --max-symbols "$TWELVE_MAX_SYMBOLS" "${maybe_dry_run_args[@]}"
+fi
+
+if [[ "$RUN_ALPHA_VANTAGE" == "1" ]]; then
+  log_step "Collecting Alpha Vantage OHLCV backup"
+  "$PYTHON_BIN" -m src.alpha_vantage --max-symbols "$ALPHA_VANTAGE_MAX_SYMBOLS" "${maybe_dry_run_args[@]}"
 fi
 
 if [[ "$RUN_INDICATORS" == "1" ]]; then

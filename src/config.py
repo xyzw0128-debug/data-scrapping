@@ -20,7 +20,7 @@ class ProviderConfig:
     max_symbols_per_run: int
     base_url: str
     interval: str
-    outputsize: int
+    outputsize: int | str
 
     @property
     def usable_daily_budget(self) -> int:
@@ -95,5 +95,5 @@ def load_provider_config(path: Path, provider_name: str) -> ProviderConfig:
         max_symbols_per_run=int(raw.get("max_symbols_per_run", 0)),
         base_url=str(raw.get("base_url", "")),
         interval=str(raw.get("interval", "1day")),
-        outputsize=int(raw.get("outputsize", 5000)),
+        outputsize=raw.get("outputsize", 5000),
     )
