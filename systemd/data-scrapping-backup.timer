@@ -1,0 +1,10 @@
+[Unit]
+Description=Run personal market data rclone backup daily
+
+[Timer]
+OnCalendar=*-*-* 23:30:00 UTC
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target
