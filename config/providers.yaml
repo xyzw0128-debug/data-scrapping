@@ -1,0 +1,23 @@
+# Minimal provider budget configuration for the Stage 1 MVP.
+# Keep actual usage below official limits so the collector can run safely for weeks.
+twelve_data:
+  enabled: true
+  api_key_env: TWELVE_DATA_API_KEY
+  daily_limit: 800
+  daily_reserve: 100
+  per_minute_limit: 8
+  max_symbols_per_run: 5
+  base_url: https://api.twelvedata.com/time_series
+  interval: 1day
+  outputsize: 5000
+
+alpha_vantage:
+  enabled: true
+  api_key_env: ALPHA_VANTAGE_API_KEY
+  daily_limit: 25
+  daily_reserve: 5
+  per_minute_limit: 5
+  max_symbols_per_run: 5
+  base_url: https://www.alphavantage.co/query
+  interval: 1day
+  outputsize: compact

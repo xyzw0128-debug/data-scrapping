@@ -1,0 +1,10 @@
+[Unit]
+Description=Run personal market data collector daily
+
+[Timer]
+OnCalendar=*-*-* 22:30:00 UTC
+Persistent=true
+RandomizedDelaySec=10m
+
+[Install]
+WantedBy=timers.target
