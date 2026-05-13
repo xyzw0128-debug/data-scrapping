@@ -19,8 +19,9 @@ The Stage 1 MVP intentionally stays small: it reads a short symbol list, respect
 - Minimal Finnhub company news collection into `data/news/`.
 - Daily summary and local hardware healthcheck JSON generation.
 - Daily orchestration script and systemd service/timer templates.
+- Lightweight CSV validation reports for OHLCV, indicators, macro, and news outputs.
 
-Not included yet: Alpha Vantage fallback, rclone backups, or DuckDB validation.
+Not included yet: Alpha Vantage fallback, rclone backups, or DuckDB-based validation.
 
 ## Layout
 
@@ -49,6 +50,7 @@ src/
   state.py
   storage.py
   summary.py
+  validate.py
 ```
 
 ## Configuration
@@ -147,6 +149,17 @@ python -m src.summary --send-discord
 ```
 
 
+
+## Data validation
+
+Run lightweight CSV validation without installing DuckDB:
+
+```bash
+python -m src.validate
+```
+
+The report is written to `data/logs/validation/latest.json`. Add `--fail-on-issues` if you want the command to exit non-zero when issues are found.
+
 ## Daily orchestration
 
 Run the full daily flow locally:
@@ -180,6 +193,6 @@ Runtime outputs are intentionally ignored by git:
 - `data/macro/` FRED macro CSV files.
 - `data/news/` Finnhub company news CSV files.
 - `data/state/state.json` and `data/state/collector.lock`.
-- `data/logs/collector.log`, `data/logs/runs/*.json`, and `data/logs/daily/*.json`.
+- `data/logs/collector.log`, `data/logs/runs/*.json`, `data/logs/daily/*.json`, and `data/logs/validation/*.json`.
 
 These files should exist on the Raspberry Pi/SSD during operation, but they should not be committed.
