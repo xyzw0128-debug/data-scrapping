@@ -1,0 +1,10 @@
+[Unit]
+Description=Backup personal market data collector outputs with rclone
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/workspace/data-scrapping
+EnvironmentFile=-/etc/data-scrapping.env
+ExecStart=/workspace/data-scrapping/scripts/rclone_backup.sh

@@ -21,8 +21,9 @@ The Stage 1 MVP intentionally stays small: it reads a short symbol list, respect
 - Daily orchestration script and systemd service/timer templates.
 - Lightweight CSV validation reports for OHLCV, indicators, macro, and news outputs.
 - Alpha Vantage OHLCV backup collector for conservative fallback use.
+- rclone backup script and systemd backup timer templates.
 
-Not included yet: rclone backups or DuckDB-based validation.
+Not included yet: DuckDB-based validation.
 
 ## Layout
 
@@ -196,6 +197,18 @@ scripts/run_daily.sh
 ```
 
 Systemd templates live under `systemd/`. On the Raspberry Pi, copy `systemd/data-scrapping.env.example` to `/etc/data-scrapping.env`, add real keys, adjust paths in the service file if needed, then install the service and timer.
+
+
+## rclone backup
+
+Back up runtime data after configuring an rclone remote:
+
+```bash
+export RCLONE_DEST="remote:data-scrapping"
+RCLONE_DRY_RUN=1 scripts/rclone_backup.sh
+```
+
+Use `BACKUP_MODE=copy` by default. Only use `BACKUP_MODE=sync` when you intentionally want the remote to mirror local deletions. The backup systemd templates are `systemd/data-scrapping-backup.service` and `systemd/data-scrapping-backup.timer`.
 
 ## Operating principle
 
