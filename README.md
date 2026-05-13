@@ -17,8 +17,9 @@ The Stage 1 MVP intentionally stays small: it reads a short symbol list, respect
 - Local technical indicator CSV generation from collected OHLCV data.
 - Minimal FRED macro series collection into `data/macro/`.
 - Minimal Finnhub company news collection into `data/news/`.
+- Daily summary and local hardware healthcheck JSON generation.
 
-Not included yet: Alpha Vantage fallback, Discord alerts, systemd timers, rclone backups, or DuckDB validation.
+Not included yet: Alpha Vantage fallback, systemd timers, rclone backups, or DuckDB validation.
 
 ## Layout
 
@@ -46,6 +47,7 @@ src/
   rate_limit.py
   state.py
   storage.py
+  summary.py
 ```
 
 ## Configuration
@@ -127,6 +129,22 @@ python -m src.indicators --symbol AAPL
 
 Indicator output is written to `data/indicators/<SYMBOL>.csv` and includes SMA 20/50/200, RSI 14, and MACD 12/26/9 columns.
 
+
+## Daily summary and healthcheck
+
+Generate a local summary of collected files, state, disk usage, and Raspberry Pi CPU temperature when available:
+
+```bash
+python -m src.summary
+```
+
+The summary is written to `data/logs/daily/<YYYY-MM-DD>.json`. To send the same summary to Discord:
+
+```bash
+export DISCORD_WEBHOOK_URL="your-discord-webhook"
+python -m src.summary --send-discord
+```
+
 ## Operating principle
 
 A successful run does not mean every symbol was collected. A successful run means the collector processed only what was safe for the current provider budget and saved enough state to continue next time.
@@ -141,6 +159,6 @@ Runtime outputs are intentionally ignored by git:
 - `data/macro/` FRED macro CSV files.
 - `data/news/` Finnhub company news CSV files.
 - `data/state/state.json` and `data/state/collector.lock`.
-- `data/logs/collector.log` and `data/logs/runs/*.json`.
+- `data/logs/collector.log`, `data/logs/runs/*.json`, and `data/logs/daily/*.json`.
 
 These files should exist on the Raspberry Pi/SSD during operation, but they should not be committed.
