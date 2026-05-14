@@ -32,6 +32,7 @@ config/
   fred_series.txt
   providers.yaml
   symbols.txt
+  symbols.txt.example
 data/
   indicators/
   logs/
@@ -60,7 +61,7 @@ src/
 
 ## Configuration
 
-Edit `config/symbols.txt` and keep the first run small. One symbol goes on each line.
+Copy `config/symbols.txt.example` to `config/symbols.txt`, then keep the first run small. One symbol goes on each line.
 
 Provider budgets live in `config/providers.yaml`. The default Twelve Data budget is deliberately conservative and keeps a reserve below the configured daily limit.
 
