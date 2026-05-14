@@ -74,14 +74,24 @@ def fetch_json(url: str, attempts: int = 2, backoff_seconds: float = 2.0) -> dic
 
 def choose_pending_symbols(symbols: list[str], state: dict, provider: str, max_symbols: int, force: bool) -> list[str]:
     symbol_state = state.setdefault("symbols", {})
-    pending = []
+    pending: list[tuple[int, str]] = []
     for symbol in symbols:
         details = symbol_state.setdefault(symbol, {})
         provider_details = details.setdefault(provider, {})
         if not force and provider_details.get("last_success_date") == utc_today():
             continue
-        pending.append(symbol)
-    return pending[:max_symbols]
+        status = provider_details.get("status")
+        if status == "failed":
+            priority = 0
+        elif status is None:
+            priority = 1
+        elif status == "skipped_rate_limit":
+            priority = 2
+        else:
+            priority = 3
+        pending.append((priority, symbol))
+    pending.sort(key=lambda item: item[0])
+    return [symbol for _, symbol in pending[:max_symbols]]
 
 
 def record_symbol_status(state: dict, provider: str, symbol: str, status: str, **extra: object) -> None:

@@ -1,11 +1,12 @@
 # PROVIDERS
 
 ## Twelve Data
-- **역할**: 기본 일일 OHLCV 수집 provider (`src.main`).
-- **알려진 한도(이 저장소 기본 설정)**: `daily_limit: 800`, `daily_reserve: 100`, `per_minute_limit: 8`, `max_symbols_per_run: 5`.
+- **역할**: 기본 일일 OHLCV 수집 provider (`src.main`) 및 NASDAQ 티커 목록 조회(`src.fetch_tickers`).
+- **알려진 한도(이 저장소 기본 설정)**: `daily_limit: 800`, `daily_reserve: 100`, `per_minute_limit: 8`, `max_symbols_per_run: 700`.
 - **실제 사용 목표**: 기본 수집 경로로 사용하되, 일일 한도를 다 쓰지 않고 reserve를 남겨 장기 안정 운영.
 - **주의사항**:
   - `state.json`의 `calls_used_today`를 기준으로 호출 가능 여부를 판단합니다.
+  - `src.fetch_tickers`는 stocks endpoint를 호출해 `config/symbols.txt`를 원자적으로 갱신하며, 기본 exchange는 NASDAQ입니다.
   - `--force`는 당일 성공 심볼 재수집이므로 필요할 때만 사용합니다.
 
 ## Alpha Vantage
