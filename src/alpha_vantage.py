@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 from src.config import ProviderConfig, load_provider_config, load_symbols
 from src.rate_limit import DailyBudget
 from src.state import ensure_daily_provider_state, load_state, save_state, utc_now_iso, utc_today
-from src.storage import ensure_data_dirs, save_raw_json, upsert_ohlcv_csv, verify_writable
+from src.storage import ensure_data_dirs, save_raw_json, upsert_ohlcv_db, verify_writable
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -84,15 +84,25 @@ def normalize_alpha_vantage_ohlcv(payload: dict) -> list[dict[str, str]]:
 
 
 def choose_pending_symbols(symbols: list[str], state: dict, provider: str, max_symbols: int, force: bool) -> list[str]:
-    """Choose symbols not yet completed today for this provider."""
+    """Choose symbols not yet completed today, retrying failures first."""
     symbol_state = state.setdefault("symbols", {})
-    pending: list[str] = []
+    pending: list[tuple[int, str]] = []
     for symbol in symbols:
         provider_details = symbol_state.setdefault(symbol, {}).setdefault(provider, {})
         if not force and provider_details.get("last_success_date") == utc_today():
             continue
-        pending.append(symbol)
-    return pending[:max_symbols]
+        status = provider_details.get("status")
+        if status == "failed":
+            priority = 0
+        elif status is None:
+            priority = 1
+        elif status == "skipped_rate_limit":
+            priority = 2
+        else:
+            priority = 3
+        pending.append((priority, symbol))
+    pending.sort(key=lambda item: item[0])
+    return [symbol for _, symbol in pending[:max_symbols]]
 
 
 def record_symbol_status(state: dict, provider: str, symbol: str, status: str, **extra: object) -> None:
@@ -114,8 +124,8 @@ def collect_symbol(config: ProviderConfig, data_dir: Path, symbol: str, api_key:
     rows = normalize_alpha_vantage_ohlcv(payload)
     if not rows:
         raise ValueError("No Alpha Vantage OHLCV rows found in response")
-    csv_path = upsert_ohlcv_csv(data_dir, symbol, rows)
-    return "done", len(rows), f"raw={raw_path} csv={csv_path}"
+    db_path = upsert_ohlcv_db(data_dir, symbol, rows)
+    return "done", len(rows), f"raw={raw_path} db={db_path}"
 
 
 def main() -> int:

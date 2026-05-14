@@ -6,7 +6,7 @@ twelve_data:
   daily_limit: 800
   daily_reserve: 100
   per_minute_limit: 8
-  max_symbols_per_run: 5
+  max_symbols_per_run: 700
   base_url: https://api.twelvedata.com/time_series
   interval: 1day
   outputsize: 5000

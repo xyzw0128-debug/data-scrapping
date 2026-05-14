@@ -7,6 +7,7 @@ The Stage 1 MVP intentionally stays small: it reads a short symbol list, respect
 ## Current scope
 
 - Twelve Data daily OHLCV collection.
+- Twelve Data NASDAQ ticker list refresh into `config/symbols.txt`.
 - `state.json` based resume tracking.
 - Provider daily limit and reserve budget checks.
 - Raw JSON archival under `data/raw/`.
@@ -54,6 +55,7 @@ src/
   summary.py
   validate.py
   validate_duckdb.py
+  fetch_tickers.py
 ```
 
 ## Configuration
@@ -69,6 +71,17 @@ Use dry-run mode first. It validates config loading, state creation, symbol sele
 ```bash
 python -m src.main --dry-run
 ```
+
+## Refresh Twelve Data ticker list
+
+Fetch the NASDAQ stock list from Twelve Data and write it to `config/symbols.txt`:
+
+```bash
+export TWELVE_DATA_API_KEY="your-api-key"
+python -m src.fetch_tickers
+```
+
+Use `--dry-run` to print counts without writing, `--exchange` to request another exchange, and `--append` to merge with the current symbol file.
 
 ## Real Twelve Data run
 
