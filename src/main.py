@@ -57,10 +57,41 @@ def build_twelve_data_url(config: ProviderConfig, symbol: str, api_key: str) -> 
     return f"{config.base_url}?{query}"
 
 
-def fetch_json(url: str, attempts: int = 2, backoff_seconds: float = 2.0) -> dict:
+class PerMinuteRateLimiter:
+    """Track API call timestamps and sleep before exceeding a per-minute limit."""
+
+    def __init__(self, per_minute_limit: int) -> None:
+        self.per_minute_limit = per_minute_limit
+        self.call_timestamps: list[float] = []
+
+    def wait(self) -> None:
+        if self.per_minute_limit <= 0:
+            return
+
+        while True:
+            now = time.monotonic()
+            self.call_timestamps = [
+                timestamp for timestamp in self.call_timestamps if now - timestamp < 60.0
+            ]
+            if len(self.call_timestamps) < self.per_minute_limit:
+                self.call_timestamps.append(now)
+                return
+
+            sleep_seconds = max(0.0, 60.0 - (now - self.call_timestamps[0]))
+            time.sleep(sleep_seconds)
+
+
+def fetch_json(
+    url: str,
+    attempts: int = 2,
+    backoff_seconds: float = 2.0,
+    rate_limiter: PerMinuteRateLimiter | None = None,
+) -> dict:
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
         try:
+            if rate_limiter is not None:
+                rate_limiter.wait()
             request = Request(url, headers={"User-Agent": "data-scrapping-mvp/0.1"})
             with urlopen(request, timeout=30) as response:
                 return json.loads(response.read().decode("utf-8"))
@@ -74,14 +105,24 @@ def fetch_json(url: str, attempts: int = 2, backoff_seconds: float = 2.0) -> dic
 
 def choose_pending_symbols(symbols: list[str], state: dict, provider: str, max_symbols: int, force: bool) -> list[str]:
     symbol_state = state.setdefault("symbols", {})
-    pending = []
+    pending: list[tuple[int, str]] = []
     for symbol in symbols:
         details = symbol_state.setdefault(symbol, {})
         provider_details = details.setdefault(provider, {})
         if not force and provider_details.get("last_success_date") == utc_today():
             continue
-        pending.append(symbol)
-    return pending[:max_symbols]
+        status = provider_details.get("status")
+        if status == "failed":
+            priority = 0
+        elif status is None:
+            priority = 1
+        elif status == "skipped_rate_limit":
+            priority = 2
+        else:
+            priority = 3
+        pending.append((priority, symbol))
+    pending.sort(key=lambda item: item[0])
+    return [symbol for _, symbol in pending[:max_symbols]]
 
 
 def record_symbol_status(state: dict, provider: str, symbol: str, status: str, **extra: object) -> None:
@@ -100,6 +141,7 @@ def collect_symbol(
     api_key: str,
     dry_run: bool,
     logger: logging.Logger,
+    rate_limiter: PerMinuteRateLimiter | None = None,
 ) -> tuple[str, int, str | None]:
     if dry_run:
         return "dry_run", 0, None
@@ -108,7 +150,7 @@ def collect_symbol(
         raise ValueError("Stage 1 MVP currently implements only the twelve_data collector")
 
     logger.info("Collecting %s from %s", symbol, config.name)
-    payload = fetch_json(build_twelve_data_url(config, symbol, api_key))
+    payload = fetch_json(build_twelve_data_url(config, symbol, api_key), rate_limiter=rate_limiter)
     raw_path = save_raw_json(data_dir, config.name, symbol, payload)
     rows = normalize_twelve_data_ohlcv(payload)
     if not rows:
@@ -135,6 +177,7 @@ def run_collection(args: argparse.Namespace, logger: logging.Logger) -> dict:
         raise RuntimeError(f"Missing API key environment variable: {config.api_key_env}")
 
     pending = choose_pending_symbols(symbols, state, config.name, max_symbols, args.force)
+    rate_limiter = PerMinuteRateLimiter(config.per_minute_limit)
     summary = {
         "started_at": utc_now_iso(),
         "provider": config.name,
@@ -158,7 +201,15 @@ def run_collection(args: argparse.Namespace, logger: logging.Logger) -> dict:
             continue
 
         try:
-            status, row_count, note = collect_symbol(config, args.data_dir, symbol, api_key, args.dry_run, logger)
+            status, row_count, note = collect_symbol(
+                config,
+                args.data_dir,
+                symbol,
+                api_key,
+                args.dry_run,
+                logger,
+                rate_limiter,
+            )
             if not args.dry_run:
                 budget.spend(1)
             record_symbol_status(state, config.name, symbol, status, rows=row_count, note=note)

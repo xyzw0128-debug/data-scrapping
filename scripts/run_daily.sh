@@ -6,11 +6,12 @@ cd "$ROOT_DIR"
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
 DRY_RUN="${DRY_RUN:-0}"
-TWELVE_MAX_SYMBOLS="${TWELVE_MAX_SYMBOLS:-5}"
+TWELVE_MAX_SYMBOLS="${TWELVE_MAX_SYMBOLS:-700}"
 FRED_LIMIT="${FRED_LIMIT:-2}"
 FINNHUB_LIMIT="${FINNHUB_LIMIT:-2}"
 FINNHUB_DAYS_BACK="${FINNHUB_DAYS_BACK:-7}"
 ALPHA_VANTAGE_MAX_SYMBOLS="${ALPHA_VANTAGE_MAX_SYMBOLS:-2}"
+RUN_FETCH_TICKERS="${RUN_FETCH_TICKERS:-0}"
 RUN_TWELVE="${RUN_TWELVE:-1}"
 RUN_ALPHA_VANTAGE="${RUN_ALPHA_VANTAGE:-0}"
 RUN_INDICATORS="${RUN_INDICATORS:-1}"
@@ -28,6 +29,11 @@ fi
 log_step() {
   printf '\n[%s] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*"
 }
+
+if [[ "$RUN_FETCH_TICKERS" == "1" ]]; then
+  log_step "Fetching Twelve Data ticker list"
+  "$PYTHON_BIN" -m src.fetch_tickers "${maybe_dry_run_args[@]}"
+fi
 
 if [[ "$RUN_TWELVE" == "1" ]]; then
   log_step "Collecting Twelve Data OHLCV"

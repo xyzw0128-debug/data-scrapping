@@ -34,6 +34,7 @@ src/
   summary.py
   validate.py
   validate_duckdb.py
+  fetch_tickers.py
 systemd/
   data-scrapping-backup.service
   data-scrapping-backup.timer
@@ -46,6 +47,7 @@ systemd/
 - `src/main.py`: Twelve Data 기반 일일 OHLCV 수집의 기본 CLI 엔트리포인트.
 - `src/alpha_vantage.py`: Alpha Vantage 일일 OHLCV 백업 수집기.
 - `src/finnhub_news.py`: Finnhub company news 수집 및 심볼별 CSV 업서트.
+- `src/fetch_tickers.py`: Twelve Data stocks endpoint에서 exchange별 티커 목록을 받아 `config/symbols.txt`를 갱신.
 - `src/fred.py`: FRED 거시 지표 series 수집 및 CSV 저장.
 - `src/indicators.py`: 로컬 OHLCV CSV 기반 기술지표(SMA/RSI/MACD) 계산.
 - `src/summary.py`: 수집 결과/상태/디스크/CPU 온도 일일 요약 생성(옵션 Discord 전송).
@@ -62,6 +64,7 @@ systemd/
 ## 데이터 흐름
 수집 → raw JSON → CSV → indicators → summary → validation
 
+- `fetch_tickers.py`가 필요 시 Twelve Data stocks endpoint에서 티커 목록을 갱신합니다.
 - 수집기(`main.py`, `alpha_vantage.py`, `fred.py`, `finnhub_news.py`)가 API에서 데이터를 가져옵니다.
 - 원본 응답은 `data/raw/<provider>/`에 JSON으로 저장됩니다.
 - 정규화된 CSV가 도메인별(`data/ohlcv`, `data/macro`, `data/news`)로 저장됩니다.

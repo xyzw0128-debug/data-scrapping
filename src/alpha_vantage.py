@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -12,7 +13,7 @@ from urllib.request import Request, urlopen
 from src.config import ProviderConfig, load_provider_config, load_symbols
 from src.rate_limit import DailyBudget
 from src.state import ensure_daily_provider_state, load_state, save_state, utc_now_iso, utc_today
-from src.storage import ensure_data_dirs, save_raw_json, upsert_ohlcv_csv, verify_writable
+from src.storage import ensure_data_dirs, save_raw_json, upsert_ohlcv_db, verify_writable
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,8 +46,34 @@ def build_alpha_vantage_url(config: ProviderConfig, symbol: str, api_key: str) -
     return f"{config.base_url}?{query}"
 
 
-def fetch_json(url: str) -> dict:
+class PerMinuteRateLimiter:
+    """Track API call timestamps and sleep before exceeding a per-minute limit."""
+
+    def __init__(self, per_minute_limit: int) -> None:
+        self.per_minute_limit = per_minute_limit
+        self.call_timestamps: list[float] = []
+
+    def wait(self) -> None:
+        if self.per_minute_limit <= 0:
+            return
+
+        while True:
+            now = time.monotonic()
+            self.call_timestamps = [
+                timestamp for timestamp in self.call_timestamps if now - timestamp < 60.0
+            ]
+            if len(self.call_timestamps) < self.per_minute_limit:
+                self.call_timestamps.append(now)
+                return
+
+            sleep_seconds = max(0.0, 60.0 - (now - self.call_timestamps[0]))
+            time.sleep(sleep_seconds)
+
+
+def fetch_json(url: str, rate_limiter: PerMinuteRateLimiter | None = None) -> dict:
     """Fetch JSON from Alpha Vantage."""
+    if rate_limiter is not None:
+        rate_limiter.wait()
     request = Request(url, headers={"User-Agent": "data-scrapping-alpha-vantage-mvp/0.1"})
     with urlopen(request, timeout=30) as response:
         return json.loads(response.read().decode("utf-8"))
@@ -84,15 +111,25 @@ def normalize_alpha_vantage_ohlcv(payload: dict) -> list[dict[str, str]]:
 
 
 def choose_pending_symbols(symbols: list[str], state: dict, provider: str, max_symbols: int, force: bool) -> list[str]:
-    """Choose symbols not yet completed today for this provider."""
+    """Choose symbols not yet completed today, retrying failures first."""
     symbol_state = state.setdefault("symbols", {})
-    pending: list[str] = []
+    pending: list[tuple[int, str]] = []
     for symbol in symbols:
         provider_details = symbol_state.setdefault(symbol, {}).setdefault(provider, {})
         if not force and provider_details.get("last_success_date") == utc_today():
             continue
-        pending.append(symbol)
-    return pending[:max_symbols]
+        status = provider_details.get("status")
+        if status == "failed":
+            priority = 0
+        elif status is None:
+            priority = 1
+        elif status == "skipped_rate_limit":
+            priority = 2
+        else:
+            priority = 3
+        pending.append((priority, symbol))
+    pending.sort(key=lambda item: item[0])
+    return [symbol for _, symbol in pending[:max_symbols]]
 
 
 def record_symbol_status(state: dict, provider: str, symbol: str, status: str, **extra: object) -> None:
@@ -105,17 +142,24 @@ def record_symbol_status(state: dict, provider: str, symbol: str, status: str, *
     provider_details.update(update)
 
 
-def collect_symbol(config: ProviderConfig, data_dir: Path, symbol: str, api_key: str, dry_run: bool) -> tuple[str, int, str | None]:
+def collect_symbol(
+    config: ProviderConfig,
+    data_dir: Path,
+    symbol: str,
+    api_key: str,
+    dry_run: bool,
+    rate_limiter: PerMinuteRateLimiter | None = None,
+) -> tuple[str, int, str | None]:
     """Collect one symbol from Alpha Vantage."""
     if dry_run:
         return "dry_run", 0, None
-    payload = fetch_json(build_alpha_vantage_url(config, symbol, api_key))
+    payload = fetch_json(build_alpha_vantage_url(config, symbol, api_key), rate_limiter=rate_limiter)
     raw_path = save_raw_json(data_dir, config.name, symbol, payload)
     rows = normalize_alpha_vantage_ohlcv(payload)
     if not rows:
         raise ValueError("No Alpha Vantage OHLCV rows found in response")
-    csv_path = upsert_ohlcv_csv(data_dir, symbol, rows)
-    return "done", len(rows), f"raw={raw_path} csv={csv_path}"
+    db_path = upsert_ohlcv_db(data_dir, symbol, rows)
+    return "done", len(rows), f"raw={raw_path} db={db_path}"
 
 
 def main() -> int:
@@ -133,6 +177,8 @@ def main() -> int:
     api_key = os.environ.get(config.api_key_env, "")
     if not args.dry_run and not api_key:
         raise RuntimeError(f"Missing Alpha Vantage API key environment variable: {config.api_key_env}")
+
+    rate_limiter = PerMinuteRateLimiter(config.per_minute_limit)
 
     summary = {
         "started_at": utc_now_iso(),
@@ -152,7 +198,14 @@ def main() -> int:
             summary["skipped_rate_limit"] += 1
             continue
         try:
-            status, row_count, note = collect_symbol(config, args.data_dir, symbol, api_key, args.dry_run)
+            status, row_count, note = collect_symbol(
+                config,
+                args.data_dir,
+                symbol,
+                api_key,
+                args.dry_run,
+                rate_limiter,
+            )
             if not args.dry_run:
                 budget.spend(1)
             record_symbol_status(state, config.name, symbol, status, rows=row_count, note=note)
