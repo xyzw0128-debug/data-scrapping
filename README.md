@@ -23,7 +23,6 @@ The Stage 1 MVP intentionally stays small: it reads a short symbol list, respect
 - Alpha Vantage OHLCV backup collector for conservative fallback use.
 - rclone backup script and systemd backup timer templates.
 
-Not included yet: DuckDB-based validation.
 
 ## Layout
 

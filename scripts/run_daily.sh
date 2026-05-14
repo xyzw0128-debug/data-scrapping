@@ -17,6 +17,7 @@ RUN_INDICATORS="${RUN_INDICATORS:-1}"
 RUN_FRED="${RUN_FRED:-1}"
 RUN_FINNHUB="${RUN_FINNHUB:-1}"
 RUN_SUMMARY="${RUN_SUMMARY:-1}"
+RUN_DUCKDB_VALIDATE="${RUN_DUCKDB_VALIDATE:-1}"
 SEND_DISCORD="${SEND_DISCORD:-0}"
 
 maybe_dry_run_args=()
@@ -60,6 +61,15 @@ if [[ "$RUN_SUMMARY" == "1" ]]; then
     summary_args=(--send-discord)
   fi
   "$PYTHON_BIN" -m src.summary "${summary_args[@]}"
+fi
+
+if [[ "$RUN_DUCKDB_VALIDATE" == "1" ]]; then
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log_step "Skipping DuckDB validation (DRY_RUN=1)"
+  else
+    log_step "Running DuckDB validation"
+    "$PYTHON_BIN" -m src.validate_duckdb
+  fi
 fi
 
 log_step "Daily run complete"
