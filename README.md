@@ -54,6 +54,7 @@ src/
   storage.py
   summary.py
   validate.py
+  validate_duckdb.py
 ```
 
 ## Configuration
@@ -178,6 +179,17 @@ python -m src.validate
 ```
 
 The report is written to `data/logs/validation/latest.json`. Add `--fail-on-issues` if you want the command to exit non-zero when issues are found.
+
+
+## DuckDB validation
+
+Run SQL-based validation checks (OHLCV duplicate dates and invalid price/volume ranges):
+
+```bash
+python -m src.validate_duckdb
+```
+
+Report output defaults to `data/logs/validation/duckdb_latest.json`.
 
 ## Daily orchestration
 

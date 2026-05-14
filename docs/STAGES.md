@@ -14,11 +14,11 @@
 - [x] 경량 CSV validation 리포트
 - [x] Alpha Vantage 백업 수집기
 - [x] rclone 백업 스크립트 및 systemd 템플릿
+- [x] DuckDB 기반 검증 CLI 구현
+- [x] DuckDB 검증 결과를 기존 `data/logs/validation/` 리포트 체계와 연동
 
 ## 다음 작업
-- [ ] DuckDB 기반 검증 CLI 구현
+- [ ] 일일 오케스트레이션(`scripts/run_daily.sh`)에 DuckDB 검증 단계를 기본 포함
 
 ## 이후 예정 작업
-- [ ] DuckDB 검증 결과를 기존 `data/logs/validation/` 리포트 체계와 연동
-- [ ] 일일 오케스트레이션(`scripts/run_daily.sh`)에 DuckDB 검증 단계를 기본 포함
 - [ ] 운영 중 축적 데이터 기준으로 검증 규칙(무결성/중복/이상치) 확장
