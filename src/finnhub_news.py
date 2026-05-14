@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
 from datetime import UTC, date, datetime, timedelta
@@ -13,7 +12,7 @@ from urllib.request import Request, urlopen
 
 from src.config import load_symbols
 from src.state import utc_now_iso
-from src.storage import ensure_data_dirs, save_raw_json
+from src.storage import ensure_data_dirs, save_raw_json, upsert_news_db
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -147,15 +146,13 @@ def collect_symbol_news(
     payload = fetch_json(build_company_news_url(symbol, start_date, end_date, api_key))
     raw_path = save_raw_json(data_dir, "finnhub_news", symbol, {"symbol": symbol, "from": start_date, "to": end_date, "items": payload})
     rows = normalize_news(payload, symbol)
-    csv_path = upsert_news_csv(data_dir, symbol, rows)
-    return "done", len(rows), f"raw={raw_path} csv={csv_path}"
+    db_path = upsert_news_db(data_dir, symbol, rows)
+    return "done", len(rows), f"raw={raw_path} db={db_path}"
 
 
 def main() -> int:
     args = parse_args()
     ensure_data_dirs(args.data_dir)
-    (args.data_dir / "news").mkdir(parents=True, exist_ok=True)
-
     symbols = args.symbol if args.symbol else load_symbols(args.symbols)
     if args.limit is not None:
         symbols = symbols[: args.limit]

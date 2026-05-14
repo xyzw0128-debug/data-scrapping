@@ -20,7 +20,7 @@ from src.storage import (
     ensure_data_dirs,
     normalize_twelve_data_ohlcv,
     save_raw_json,
-    upsert_ohlcv_csv,
+    upsert_ohlcv_db,
     verify_writable,
     save_run_summary,
 )
@@ -113,8 +113,8 @@ def collect_symbol(
     rows = normalize_twelve_data_ohlcv(payload)
     if not rows:
         raise ValueError("No OHLCV rows found in response")
-    csv_path = upsert_ohlcv_csv(data_dir, symbol, rows)
-    return "done", len(rows), f"raw={raw_path} csv={csv_path}"
+    db_path = upsert_ohlcv_db(data_dir, symbol, rows)
+    return "done", len(rows), f"raw={raw_path} db={db_path}"
 
 
 def run_collection(args: argparse.Namespace, logger: logging.Logger) -> dict:
