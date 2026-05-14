@@ -185,7 +185,7 @@ Run DuckDB-based validation (optional):
 python -m src.validate_duckdb
 ```
 
-The DuckDB report is written to `data/logs/validation/latest_duckdb.json`.
+The DuckDB report is written to `data/logs/validation/latest_duckdb.json`. If `duckdb` is not installed, the command prints an error JSON with install guidance and exits non-zero.
 
 ## Daily orchestration
 

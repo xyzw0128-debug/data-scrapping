@@ -187,7 +187,19 @@ def save_report(path: Path, report: dict[str, object]) -> Path:
 
 def main() -> int:
     args = parse_args()
-    report = validate_with_duckdb(args.data_dir)
+    try:
+        report = validate_with_duckdb(args.data_dir)
+    except RuntimeError as exc:
+        error_report = {
+            "engine": "duckdb",
+            "status": "error",
+            "issue_count": 0,
+            "issues": [],
+            "error": str(exc),
+        }
+        print(json.dumps(error_report, ensure_ascii=False, indent=2, sort_keys=True))
+        return 2
+
     output = args.output or args.data_dir / "logs" / "validation" / "latest_duckdb.json"
     report["report_path"] = str(save_report(output, report))
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
