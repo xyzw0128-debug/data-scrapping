@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
-import os
 from pathlib import Path
 
 from src.config import load_symbols
-from src.storage import OHLCV_FIELDS, ensure_data_dirs
+from src.storage import OHLCV_FIELDS, ensure_data_dirs, load_ohlcv_rows_db, save_indicator_rows_db
 
 
 INDICATOR_FIELDS = [
@@ -50,15 +48,6 @@ def _format_number(value: float | None) -> str:
         return ""
     return f"{value:.6f}".rstrip("0").rstrip(".")
 
-
-def load_ohlcv_csv(path: Path) -> list[dict[str, str]]:
-    """Load an OHLCV CSV sorted by date."""
-    if not path.exists():
-        return []
-    with path.open("r", encoding="utf-8", newline="") as handle:
-        rows = [{field: str(row.get(field, "")) for field in OHLCV_FIELDS} for row in csv.DictReader(handle)]
-    rows.sort(key=lambda row: row["date"])
-    return rows
 
 
 def calculate_sma(values: list[float | None], period: int) -> list[float | None]:
@@ -188,37 +177,19 @@ def add_indicators(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     return output
 
 
-def write_indicator_csv(data_dir: Path, symbol: str, rows: list[dict[str, str]]) -> Path:
-    """Write indicator-enriched CSV for one symbol."""
-    output_dir = data_dir / "indicators"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / f"{_safe_symbol(symbol)}.csv"
-    tmp_path = path.with_suffix(".csv.tmp")
-    with tmp_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=[*OHLCV_FIELDS, *INDICATOR_FIELDS])
-        writer.writeheader()
-        writer.writerows(rows)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp_path, path)
-    return path
-
 
 def calculate_for_symbol(data_dir: Path, symbol: str) -> tuple[str, int, str | None]:
     """Calculate indicators for a symbol, returning status, row count, and output path."""
-    input_path = data_dir / "ohlcv" / f"{_safe_symbol(symbol)}.csv"
-    rows = load_ohlcv_csv(input_path)
+    rows = load_ohlcv_rows_db(data_dir, symbol)
     if not rows:
         return "missing_ohlcv", 0, None
-    output_path = write_indicator_csv(data_dir, symbol, add_indicators(rows))
+    output_path = save_indicator_rows_db(data_dir, symbol, add_indicators(rows))
     return "done", len(rows), str(output_path)
 
 
 def main() -> int:
     args = parse_args()
     ensure_data_dirs(args.data_dir)
-    (args.data_dir / "indicators").mkdir(parents=True, exist_ok=True)
-
     symbols = args.symbol if args.symbol else load_symbols(args.symbols)
     summary = {"processed": 0, "missing_ohlcv": 0, "symbols": []}
     for symbol in symbols:

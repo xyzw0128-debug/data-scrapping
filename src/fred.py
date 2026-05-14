@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
 from pathlib import Path
@@ -11,7 +10,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from src.state import utc_now_iso
-from src.storage import ensure_data_dirs, save_raw_json
+from src.storage import ensure_data_dirs, save_raw_json, upsert_macro_db
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -87,22 +86,6 @@ def normalize_observations(payload: dict) -> list[dict[str, str]]:
     return rows
 
 
-def write_macro_csv(data_dir: Path, series_id: str, rows: list[dict[str, str]]) -> Path:
-    """Write one FRED macro series CSV."""
-    output_dir = data_dir / "macro"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / f"FRED_{series_id}.csv"
-    tmp_path = path.with_suffix(".csv.tmp")
-    with tmp_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=MACRO_FIELDS)
-        writer.writeheader()
-        writer.writerows(rows)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp_path, path)
-    return path
-
-
 def collect_series(data_dir: Path, series_id: str, api_key: str, dry_run: bool) -> tuple[str, int, str | None]:
     """Collect one FRED series and return status, row count, and output note."""
     if dry_run:
@@ -113,15 +96,13 @@ def collect_series(data_dir: Path, series_id: str, api_key: str, dry_run: bool) 
     rows = normalize_observations(payload)
     if not rows:
         raise ValueError("No FRED observation rows found in response")
-    csv_path = write_macro_csv(data_dir, series_id, rows)
-    return "done", len(rows), f"raw={raw_path} csv={csv_path}"
+    db_path = upsert_macro_db(data_dir, series_id, rows)
+    return "done", len(rows), f"raw={raw_path} db={db_path}"
 
 
 def main() -> int:
     args = parse_args()
     ensure_data_dirs(args.data_dir)
-    (args.data_dir / "macro").mkdir(parents=True, exist_ok=True)
-
     series_ids = args.series if args.series else load_series(args.series_file)
     if args.limit is not None:
         series_ids = series_ids[: args.limit]

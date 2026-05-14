@@ -16,6 +16,7 @@
 - [x] rclone 백업 스크립트 및 systemd 템플릿
 - [x] DuckDB 기반 검증 CLI 구현
 - [x] DuckDB 검증 결과를 기존 `data/logs/validation/` 리포트 체계와 연동
+- [x] CSV 저장(ohlcv/indicators/macro/news)에서 DuckDB 단일 DB(`data/db/market.db`) 저장 구조로 전환
 
 ## 다음 작업
 - [x] run_daily.sh에 DuckDB 검증 단계 포함
