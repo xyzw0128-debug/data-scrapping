@@ -1,4 +1,4 @@
-"""DuckDB-based data quality checks for collected local CSV files."""
+"""DuckDB-based validation checks for collected local CSV files."""
 
 from __future__ import annotations
 
@@ -6,203 +6,123 @@ import argparse
 import json
 from pathlib import Path
 
+from src.storage import ensure_data_dirs
+from src.validate import save_report
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Validate collected CSV files with DuckDB.")
+    parser = argparse.ArgumentParser(description="Validate collected CSV files using DuckDB SQL checks.")
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
     parser.add_argument("--output", type=Path, default=None, help="Validation report JSON path")
     parser.add_argument("--fail-on-issues", action="store_true", help="Exit 1 when any issue is found")
     return parser.parse_args()
 
 
-def _load_duckdb():
-    try:
-        import duckdb  # type: ignore
-    except ImportError as exc:
-        raise RuntimeError(
-            "duckdb is not installed. Install with: pip install duckdb"
-        ) from exc
-    return duckdb
-
-
-def _table_exists(con, table_name: str) -> bool:
-    row = con.execute(
-        """
-        SELECT COUNT(*)
-        FROM information_schema.tables
-        WHERE table_schema = 'main' AND table_name = ?
-        """,
-        [table_name],
-    ).fetchone()
-    return bool(row and int(row[0]) > 0)
-
-
-def _register_csv_table(con, table_name: str, pattern: str) -> bool:
-    sql = f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM read_csv_auto(?, union_by_name=true, filename=true)"
-    try:
-        con.execute(sql, [pattern])
-    except Exception:
-        return False
-    return _table_exists(con, table_name)
-
-
-def _append_issue(issues: list[dict[str, object]], dataset: str, issue_type: str, count: int, detail: str) -> None:
-    if count <= 0:
-        return
-    issues.append({"dataset": dataset, "type": issue_type, "count": int(count), "detail": detail})
+def _collect_file_counts(data_dir: Path) -> dict[str, int]:
+    return {
+        "ohlcv": len(list((data_dir / "ohlcv").glob("*.csv"))),
+        "indicators": len(list((data_dir / "indicators").glob("*.csv"))),
+        "macro": len(list((data_dir / "macro").glob("*.csv"))),
+        "news": len(list((data_dir / "news").glob("*.csv"))),
+    }
 
 
 def validate_with_duckdb(data_dir: Path) -> dict[str, object]:
-    duckdb = _load_duckdb()
+    ensure_data_dirs(data_dir)
+
+    try:
+        import duckdb  # type: ignore
+    except ModuleNotFoundError:
+        return {
+            "status": "error",
+            "engine": "duckdb",
+            "checked_files": _collect_file_counts(data_dir),
+            "issue_count": 1,
+            "issues": [
+                {
+                    "type": "missing_dependency",
+                    "dependency": "duckdb",
+                    "hint": "Install with: pip install duckdb",
+                }
+            ],
+        }
+
     con = duckdb.connect(database=":memory:")
-
-    checks: dict[str, bool] = {
-        "ohlcv": _register_csv_table(con, "ohlcv", str(data_dir / "ohlcv" / "*.csv")),
-        "indicators": _register_csv_table(con, "indicators", str(data_dir / "indicators" / "*.csv")),
-        "macro": _register_csv_table(con, "macro", str(data_dir / "macro" / "*.csv")),
-        "news": _register_csv_table(con, "news", str(data_dir / "news" / "*.csv")),
-    }
-
     issues: list[dict[str, object]] = []
 
-    if checks["ohlcv"]:
-        duplicate_count = con.execute(
+    ohlcv_glob = str((data_dir / "ohlcv" / "*.csv").as_posix())
+    file_count = _collect_file_counts(data_dir)["ohlcv"]
+    if file_count > 0:
+        duplicates = con.execute(
             """
-            SELECT COUNT(*)
-            FROM (
-              SELECT filename, date, COUNT(*) AS c
-              FROM ohlcv
-              GROUP BY filename, date
-              HAVING COUNT(*) > 1
-            ) t
-            """
-        ).fetchone()[0]
-        _append_issue(issues, "ohlcv", "duplicate_date", duplicate_count, "duplicate date rows per file")
+            SELECT filename, date, COUNT(*) AS duplicate_count
+            FROM read_csv_auto(?, filename=true)
+            GROUP BY filename, date
+            HAVING COUNT(*) > 1
+            ORDER BY filename, date
+            LIMIT 200
+            """,
+            [ohlcv_glob],
+        ).fetchall()
+        for filename, row_date, duplicate_count in duplicates:
+            issues.append(
+                {
+                    "dataset": "ohlcv",
+                    "file": str(filename),
+                    "type": "duplicate_date",
+                    "date": str(row_date),
+                    "duplicate_count": int(duplicate_count),
+                }
+            )
 
-        missing_required_count = con.execute(
+        invalid_ranges = con.execute(
             """
-            SELECT COUNT(*)
-            FROM ohlcv
-            WHERE coalesce(date, '') = ''
-               OR coalesce(open, '') = ''
-               OR coalesce(high, '') = ''
-               OR coalesce(low, '') = ''
-               OR coalesce(close, '') = ''
-               OR coalesce(volume, '') = ''
-            """
-        ).fetchone()[0]
-        _append_issue(issues, "ohlcv", "missing_required", missing_required_count, "required OHLCV field is empty")
+            SELECT filename, date, open, high, low, close, volume
+            FROM read_csv_auto(?, filename=true)
+            WHERE high < low
+               OR open NOT BETWEEN low AND high
+               OR close NOT BETWEEN low AND high
+               OR volume < 0
+            ORDER BY filename, date
+            LIMIT 200
+            """,
+            [ohlcv_glob],
+        ).fetchall()
+        for filename, row_date, open_value, high_value, low_value, close_value, volume_value in invalid_ranges:
+            issues.append(
+                {
+                    "dataset": "ohlcv",
+                    "file": str(filename),
+                    "type": "invalid_price_or_volume_range",
+                    "date": str(row_date),
+                    "open": open_value,
+                    "high": high_value,
+                    "low": low_value,
+                    "close": close_value,
+                    "volume": volume_value,
+                }
+            )
 
-        high_below_low_count = con.execute(
-            """
-            SELECT COUNT(*)
-            FROM ohlcv
-            WHERE try_cast(high AS DOUBLE) IS NOT NULL
-              AND try_cast(low AS DOUBLE) IS NOT NULL
-              AND try_cast(high AS DOUBLE) < try_cast(low AS DOUBLE)
-            """
-        ).fetchone()[0]
-        _append_issue(issues, "ohlcv", "high_below_low", high_below_low_count, "high is below low")
-
-        negative_volume_count = con.execute(
-            """
-            SELECT COUNT(*)
-            FROM ohlcv
-            WHERE try_cast(volume AS DOUBLE) IS NOT NULL
-              AND try_cast(volume AS DOUBLE) < 0
-            """
-        ).fetchone()[0]
-        _append_issue(issues, "ohlcv", "negative_volume", negative_volume_count, "volume is negative")
-
-    if checks["indicators"]:
-        missing_cols = [
-            "date",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "sma_20",
-            "rsi_14",
-            "macd_12_26",
-        ]
-        missing_cols_count = 0
-        for col in missing_cols:
-            exists = con.execute(
-                "SELECT COUNT(*) FROM information_schema.columns WHERE table_name='indicators' AND column_name=?",
-                [col],
-            ).fetchone()[0]
-            if int(exists) == 0:
-                missing_cols_count += 1
-        _append_issue(issues, "indicators", "missing_columns", missing_cols_count, "required indicator columns missing")
-
-    if checks["macro"]:
-        missing_cols = ["date", "value", "realtime_start", "realtime_end"]
-        missing_cols_count = 0
-        for col in missing_cols:
-            exists = con.execute(
-                "SELECT COUNT(*) FROM information_schema.columns WHERE table_name='macro' AND column_name=?",
-                [col],
-            ).fetchone()[0]
-            if int(exists) == 0:
-                missing_cols_count += 1
-        _append_issue(issues, "macro", "missing_columns", missing_cols_count, "required macro columns missing")
-
-    if checks["news"]:
-        missing_cols = ["id", "symbol", "datetime", "headline", "url"]
-        missing_cols_count = 0
-        for col in missing_cols:
-            exists = con.execute(
-                "SELECT COUNT(*) FROM information_schema.columns WHERE table_name='news' AND column_name=?",
-                [col],
-            ).fetchone()[0]
-            if int(exists) == 0:
-                missing_cols_count += 1
-        _append_issue(issues, "news", "missing_columns", missing_cols_count, "required news columns missing")
-
-    report = {
-        "engine": "duckdb",
+    return {
         "status": "pass" if not issues else "fail",
-        "checked_files": checks,
+        "engine": "duckdb",
+        "checked_files": _collect_file_counts(data_dir),
         "issue_count": len(issues),
         "issues": issues,
     }
-    con.close()
-    return report
-
-
-def save_report(path: Path, report: dict[str, object]) -> Path:
-    """Save validation report JSON atomically."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    with tmp_path.open("w", encoding="utf-8") as handle:
-        json.dump(report, handle, ensure_ascii=False, indent=2, sort_keys=True)
-        handle.write("\n")
-    tmp_path.replace(path)
-    return path
 
 
 def main() -> int:
     args = parse_args()
-    try:
-        report = validate_with_duckdb(args.data_dir)
-    except RuntimeError as exc:
-        error_report = {
-            "engine": "duckdb",
-            "status": "error",
-            "issue_count": 0,
-            "issues": [],
-            "error": str(exc),
-        }
-        print(json.dumps(error_report, ensure_ascii=False, indent=2, sort_keys=True))
-        return 2
-
-    output = args.output or args.data_dir / "logs" / "validation" / "latest_duckdb.json"
+    report = validate_with_duckdb(args.data_dir)
+    output = args.output or args.data_dir / "logs" / "validation" / "duckdb_latest.json"
     report["report_path"] = str(save_report(output, report))
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+
+    if report["status"] == "error":
+        return 2
     return 1 if args.fail_on_issues and report["issue_count"] else 0
 
 

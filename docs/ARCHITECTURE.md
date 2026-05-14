@@ -33,6 +33,7 @@ src/
   storage.py
   summary.py
   validate.py
+  validate_duckdb.py
 systemd/
   data-scrapping-backup.service
   data-scrapping-backup.timer
@@ -49,6 +50,7 @@ systemd/
 - `src/indicators.py`: 로컬 OHLCV CSV 기반 기술지표(SMA/RSI/MACD) 계산.
 - `src/summary.py`: 수집 결과/상태/디스크/CPU 온도 일일 요약 생성(옵션 Discord 전송).
 - `src/validate.py`: OHLCV/indicators/macro/news CSV 경량 검증 리포트 생성.
+- `src/validate_duckdb.py`: DuckDB SQL 기반 OHLCV 무결성(중복/가격 범위/거래량) 검증 리포트 생성.
 - `src/config.py`: symbols/providers 설정 로딩 및 provider 설정 객체화.
 - `src/rate_limit.py`: 일일 예산/리저브 기반 API 호출 가능 여부 판단.
 - `src/state.py`: `state.json` 기본 스키마, 로드/저장, provider 일일 상태 리셋.
