@@ -55,7 +55,12 @@ def format_discord_message(summary:dict[str,object])->str:
     return f"[data-scrapping] {summary['date']} summary\nraw_json={summary['files']['raw_json_count']} ohlcv={t['ohlcv']} indicators={t['indicators']} macro={t['macro']} news={t['news']}\ndisk_free_gb={d['free_gb']} cpu_temp_c={summary['hardware']['cpu_temp_c']}"
 
 def send_discord(url:str,msg:str)->None:
-    req=Request(url,data=json.dumps({"content":msg}).encode('utf-8'),headers={"Content-Type":"application/json"},method='POST')
+    req=Request(
+        url,
+        data=json.dumps({"content":msg}).encode('utf-8'),
+        headers={"Content-Type":"application/json", "User-Agent": "data-scrapping-summary/0.1"},
+        method='POST',
+    )
     with urlopen(req,timeout=15) as r: r.read()
 
 def main()->int:
