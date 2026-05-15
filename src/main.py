@@ -154,7 +154,6 @@ def collect_symbol(
     if config.name != "twelve_data":
         raise ValueError("Stage 1 MVP currently implements only the twelve_data collector")
 
-<<<<<<< HEAD
     logger.info("Collecting %s from %s", symbol, config.name)
     payload = fetch_json(build_twelve_data_url(config, symbol, api_key), rate_limiter=rate_limiter)
     raw_path = save_raw_json(data_dir, config.name, symbol, payload)
@@ -163,7 +162,6 @@ def collect_symbol(
         raise ValueError("No OHLCV rows found in response")
     db_path = upsert_ohlcv_db(data_dir, symbol, rows)
     return "done", len(rows), f"raw={raw_path} db={db_path}"
-=======
     url = build_twelve_data_url(config, symbol, api_key)
     last_raw_path: Path | None = None
     for attempt in range(2):
@@ -185,7 +183,6 @@ def collect_symbol(
         return "done", len(rows), f"raw={last_raw_path} db={db_path}"
 
     raise ValueError(f"No OHLCV rows found in response after retry; raw={last_raw_path}")
->>>>>>> 9d56c18 (Retry Twelve Data rate-limit responses)
 
 
 def run_collection(args: argparse.Namespace, logger: logging.Logger) -> dict:
