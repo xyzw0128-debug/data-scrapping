@@ -46,7 +46,10 @@ def _count_progress(data_dir: Path, total: int) -> int:
     today = utc_today()
     done = 0
     for item in symbols.values() if isinstance(symbols, dict) else []:
-        if isinstance(item, dict) and item.get("last_success_date") == today:
+        if not isinstance(item, dict):
+            continue
+        provider_state = item.get("twelve_data", {})
+        if isinstance(provider_state, dict) and provider_state.get("last_success_date") == today:
             done += 1
     return min(done, total)
 
