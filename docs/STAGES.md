@@ -23,6 +23,11 @@
 - [x] run_daily.sh에 선택적 티커 목록 갱신 단계 추가
 - [x] DuckDB 검증 결과를 기존 `data/logs/validation/` 리포트 체계와 연동
 - [x] CSV 저장(ohlcv/indicators/macro/news)에서 DuckDB 단일 DB(`data/db/market.db`) 저장 구조로 전환
+- [x] `src.finnhub_news`의 미사용 CSV upsert 코드(`upsert_news_csv`) 제거
+- [x] `AGENTS.md`를 에이전트 실행용 체크리스트 형태로 정리
+- [x] `src.summary` Discord webhook 요청에 커스텀 User-Agent 헤더 추가(403 대응)
+- [x] Webhook 기반 Discord 상태 메시지 생성/수정(실시간 진행률/전원 상태 표시) 추가
+- [x] Discord 진행률 카운트를 provider 중첩 상태(`symbols.<symbol>.twelve_data`) 기준으로 보정
 
 ## 다음 작업
 - [x] run_daily.sh에 DuckDB 검증 단계 포함
