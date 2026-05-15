@@ -25,6 +25,7 @@
 - [x] CSV 저장(ohlcv/indicators/macro/news)에서 DuckDB 단일 DB(`data/db/market.db`) 저장 구조로 전환
 - [x] `src.finnhub_news`의 미사용 CSV upsert 코드(`upsert_news_csv`) 제거
 - [x] `AGENTS.md`를 에이전트 실행용 체크리스트 형태로 정리
+- [x] `src.summary` Discord webhook 요청에 커스텀 User-Agent 헤더 추가(403 대응)
 
 ## 다음 작업
 - [x] run_daily.sh에 DuckDB 검증 단계 포함
