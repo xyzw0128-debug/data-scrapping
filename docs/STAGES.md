@@ -19,6 +19,11 @@
 - [x] Twelve Data 런당 심볼 처리량을 700개로 확대
 - [x] 수집 대기열에서 실패 심볼을 우선 재시도하도록 정렬
 - [x] 수집기 per-minute API 호출 제한 적용
+<<<<<<< HEAD
+=======
+- [x] Twelve Data rate-limit 응답 시 60초 대기 후 1회 재시도
+- [x] 런타임 심볼 목록을 gitignore 처리하고 예제 파일 추가
+>>>>>>> 9d56c18 (Retry Twelve Data rate-limit responses)
 - [x] Alpha Vantage DuckDB 저장 경로 회귀 테스트 추가
 - [x] run_daily.sh에 선택적 티커 목록 갱신 단계 추가
 - [x] DuckDB 검증 결과를 기존 `data/logs/validation/` 리포트 체계와 연동
