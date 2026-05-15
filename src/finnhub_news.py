@@ -17,7 +17,6 @@ from src.storage import ensure_data_dirs, save_raw_json, upsert_news_db
 
 ROOT = Path(__file__).resolve().parents[1]
 FINNHUB_COMPANY_NEWS_URL = "https://finnhub.io/api/v1/company-news"
-NEWS_FIELDS = ["id", "symbol", "datetime", "date", "headline", "source", "summary", "url", "image", "category"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -94,41 +93,6 @@ def normalize_news(payload: list[dict] | dict, symbol: str) -> list[dict[str, st
         )
     rows.sort(key=lambda row: (row["datetime"], row["id"], row["url"]))
     return rows
-
-
-def _dedupe_key(row: dict[str, str]) -> str:
-    return row.get("id") or row.get("url") or f"{row.get('datetime')}|{row.get('headline')}"
-
-
-def upsert_news_csv(data_dir: Path, symbol: str, rows: list[dict[str, str]]) -> Path:
-    """Write symbol-level Finnhub news CSV, replacing duplicate IDs/URLs."""
-    output_dir = data_dir / "news"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / f"FINNHUB_{symbol.replace('/', '_')}.csv"
-
-    merged: dict[str, dict[str, str]] = {}
-    if path.exists():
-        with path.open("r", encoding="utf-8", newline="") as handle:
-            for row in csv.DictReader(handle):
-                key = _dedupe_key(row)
-                if key:
-                    merged[key] = {field: str(row.get(field, "")) for field in NEWS_FIELDS}
-
-    for row in rows:
-        key = _dedupe_key(row)
-        if key:
-            merged[key] = {field: str(row.get(field, "")) for field in NEWS_FIELDS}
-
-    tmp_path = path.with_suffix(".csv.tmp")
-    ordered_rows = sorted(merged.values(), key=lambda row: (row["datetime"], row["id"], row["url"]))
-    with tmp_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=NEWS_FIELDS)
-        writer.writeheader()
-        writer.writerows(ordered_rows)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp_path, path)
-    return path
 
 
 def collect_symbol_news(
