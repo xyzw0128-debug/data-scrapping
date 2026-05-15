@@ -26,6 +26,7 @@
 - [x] `src.finnhub_news`의 미사용 CSV upsert 코드(`upsert_news_csv`) 제거
 - [x] `AGENTS.md`를 에이전트 실행용 체크리스트 형태로 정리
 - [x] `src.summary` Discord webhook 요청에 커스텀 User-Agent 헤더 추가(403 대응)
+- [x] Webhook 기반 Discord 상태 메시지 생성/수정(실시간 진행률/전원 상태 표시) 추가
 
 ## 다음 작업
 - [x] run_daily.sh에 DuckDB 검증 단계 포함
