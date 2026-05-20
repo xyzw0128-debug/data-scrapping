@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -14,18 +14,35 @@ class ProviderConfig:
     name: str
     enabled: bool
     api_key_env: str
-    daily_limit: int
-    daily_reserve: int
-    per_minute_limit: int
-    max_symbols_per_run: int
-    base_url: str
-    interval: str
-    outputsize: int | str
+    api_key_envs: tuple[str, ...] = field(default_factory=tuple)
+    daily_limit: int = 0
+    daily_reserve: int = 0
+    per_minute_limit: int = 0
+    max_symbols_per_run: int = 0
+    base_url: str = ""
+    interval: str = "1day"
+    outputsize: int | str = 5000
 
     @property
     def usable_daily_budget(self) -> int:
         """Return the daily calls/credits that can be used without touching reserve."""
         return max(0, self.daily_limit - self.daily_reserve)
+
+    def resolved_key_envs(self) -> list[str]:
+        """Return the ordered list of API key env var names for this provider.
+
+        Prefers api_key_envs if set, otherwise falls back to [api_key_env].
+        Deduplicates while preserving order.
+        """
+        envs: list[str] = []
+        seen: set[str] = set()
+        candidates = list(self.api_key_envs) if self.api_key_envs else [self.api_key_env]
+        for env in candidates:
+            env = env.strip()
+            if env and env not in seen:
+                seen.add(env)
+                envs.append(env)
+        return envs or [self.api_key_env]
 
 
 def _coerce_scalar(value: str) -> Any:
@@ -40,13 +57,7 @@ def _coerce_scalar(value: str) -> Any:
 
 
 def _load_simple_yaml(path: Path) -> dict[str, dict[str, Any]]:
-    """Load the tiny subset of YAML used by config/providers.yaml.
-
-    This avoids adding a dependency for the Stage 1 MVP. Supported shape:
-
-    provider_name:
-      key: value
-    """
+    """Load the tiny subset of YAML used by config/providers.yaml."""
     result: dict[str, dict[str, Any]] = {}
     current_section: str | None = None
 
@@ -85,10 +96,18 @@ def load_provider_config(path: Path, provider_name: str) -> ProviderConfig:
         raise ValueError(f"Provider {provider_name!r} not found. Available: {available}")
 
     raw = providers[provider_name]
+
+    # Parse api_key_envs: comma-separated string → tuple of env var names.
+    raw_envs = str(raw.get("api_key_envs", "")).strip()
+    api_key_envs: tuple[str, ...] = tuple(
+        e.strip() for e in raw_envs.split(",") if e.strip()
+    ) if raw_envs else ()
+
     return ProviderConfig(
         name=provider_name,
         enabled=bool(raw.get("enabled", False)),
         api_key_env=str(raw.get("api_key_env", "")),
+        api_key_envs=api_key_envs,
         daily_limit=int(raw.get("daily_limit", 0)),
         daily_reserve=int(raw.get("daily_reserve", 0)),
         per_minute_limit=int(raw.get("per_minute_limit", 0)),

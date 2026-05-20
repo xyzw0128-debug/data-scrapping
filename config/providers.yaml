@@ -1,8 +1,13 @@
 # Minimal provider budget configuration for the Stage 1 MVP.
 # Keep actual usage below official limits so the collector can run safely for weeks.
+#
+# Multi-key rotation: set api_key_envs as a comma-separated list of env var names.
+# Keys are used in order; the next key is activated only after the current one is exhausted.
+# api_key_env (single key) is still supported for backward compatibility.
 twelve_data:
   enabled: true
   api_key_env: TWELVE_DATA_API_KEY
+  api_key_envs: TWELVE_DATA_API_KEY_1,TWELVE_DATA_API_KEY_2,TWELVE_DATA_API_KEY_3
   daily_limit: 800
   daily_reserve: 100
   per_minute_limit: 8
