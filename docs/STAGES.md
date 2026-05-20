@@ -19,11 +19,8 @@
 - [x] Twelve Data 런당 심볼 처리량을 700개로 확대
 - [x] 수집 대기열에서 실패 심볼을 우선 재시도하도록 정렬
 - [x] 수집기 per-minute API 호출 제한 적용
-<<<<<<< HEAD
-=======
 - [x] Twelve Data rate-limit 응답 시 60초 대기 후 1회 재시도
 - [x] 런타임 심볼 목록을 gitignore 처리하고 예제 파일 추가
->>>>>>> 9d56c18 (Retry Twelve Data rate-limit responses)
 - [x] Alpha Vantage DuckDB 저장 경로 회귀 테스트 추가
 - [x] run_daily.sh에 선택적 티커 목록 갱신 단계 추가
 - [x] DuckDB 검증 결과를 기존 `data/logs/validation/` 리포트 체계와 연동
@@ -32,6 +29,7 @@
 - [x] `AGENTS.md`를 에이전트 실행용 체크리스트 형태로 정리
 - [x] `src.summary` Discord webhook 요청에 커스텀 User-Agent 헤더 추가(403 대응)
 - [x] Webhook 기반 Discord 상태 메시지 생성/수정(실시간 진행률/전원 상태 표시) 추가
+- [x] Discord 진행률 카운트를 provider 중첩 상태(`symbols.<symbol>.twelve_data`) 기준으로 보정
 
 ## 다음 작업
 - [x] run_daily.sh에 DuckDB 검증 단계 포함
