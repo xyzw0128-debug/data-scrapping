@@ -32,7 +32,6 @@ log_step() {
   printf '\n[%s] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*"
 }
 
-<<<<<<< HEAD
 update_discord_status() {
   if [[ "$SEND_DISCORD" == "1" ]]; then
     "$PYTHON_BIN" -m src.discord_status "$@"
@@ -65,8 +64,6 @@ trap stop_status_monitor EXIT
 
 update_discord_status --status "대기중" --set-start --current-symbol "없음"
 
-=======
->>>>>>> 9d56c18 (Retry Twelve Data rate-limit responses)
 if [[ "$RUN_FETCH_TICKERS" == "1" ]]; then
   log_step "Fetching Twelve Data ticker list"
   "$PYTHON_BIN" -m src.fetch_tickers "${maybe_dry_run_args[@]}"
