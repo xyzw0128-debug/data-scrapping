@@ -7,6 +7,7 @@ config/
   fred_series.txt
   providers.yaml
   symbols.txt
+  symbols.txt.example
 data/
   indicators/
   logs/
