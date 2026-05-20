@@ -30,6 +30,7 @@
 - [x] `src.summary` Discord webhook 요청에 커스텀 User-Agent 헤더 추가(403 대응)
 - [x] Webhook 기반 Discord 상태 메시지 생성/수정(실시간 진행률/전원 상태 표시) 추가
 - [x] Discord 진행률 카운트를 provider 중첩 상태(`symbols.<symbol>.twelve_data`) 기준으로 보정
+- [ ] 다중 API 키 순차 소진 로테이션(KeyPool) 구현 (Twelve Data, Alpha Vantage)
 
 ## 다음 작업
 - [x] run_daily.sh에 DuckDB 검증 단계 포함
