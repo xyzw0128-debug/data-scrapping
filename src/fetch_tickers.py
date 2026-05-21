@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from src.config import load_provider_config, load_symbols
+from src.env import load_project_env
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -88,6 +89,7 @@ def merge_symbols(existing: list[str], fetched: list[str]) -> list[str]:
 
 
 def main() -> int:
+    load_project_env(ROOT)
     args = parse_args()
     config = load_provider_config(args.providers, args.provider)
     api_key = os.environ.get(config.api_key_env, "")

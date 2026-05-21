@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from src.config import ProviderConfig, load_provider_config, load_symbols
+from src.env import load_project_env
 from src.rate_limit import DailyBudget, KeyPool
 from src.state import ensure_daily_provider_state, load_state, save_state, utc_now_iso, utc_today
 from src.storage import ensure_data_dirs, save_raw_json, upsert_ohlcv_db, verify_writable
@@ -111,7 +112,7 @@ def normalize_alpha_vantage_ohlcv(payload: dict) -> list[dict[str, str]]:
 
 
 def choose_pending_symbols(symbols: list[str], state: dict, provider: str, max_symbols: int, force: bool) -> list[str]:
-    """Choose symbols not yet completed today, retrying failures first."""
+    """Choose symbols not yet completed today, deferring previous failures."""
     symbol_state = state.setdefault("symbols", {})
     pending: list[tuple[int, str]] = []
     for symbol in symbols:
@@ -119,11 +120,11 @@ def choose_pending_symbols(symbols: list[str], state: dict, provider: str, max_s
         if not force and provider_details.get("last_success_date") == utc_today():
             continue
         status = provider_details.get("status")
-        if status == "failed":
+        if status is None:
             priority = 0
-        elif status is None:
-            priority = 1
         elif status == "skipped_rate_limit":
+            priority = 1
+        elif status == "failed":
             priority = 2
         else:
             priority = 3
@@ -163,6 +164,7 @@ def collect_symbol(
 
 
 def main() -> int:
+    load_project_env(ROOT)
     args = parse_args()
     ensure_data_dirs(args.data_dir)
     verify_writable(args.data_dir / "state")

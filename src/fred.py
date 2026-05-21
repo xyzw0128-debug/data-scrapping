@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from src.env import load_project_env
 from src.state import utc_now_iso
 from src.storage import ensure_data_dirs, save_raw_json, upsert_macro_db
 
@@ -101,6 +102,7 @@ def collect_series(data_dir: Path, series_id: str, api_key: str, dry_run: bool) 
 
 
 def main() -> int:
+    load_project_env(ROOT)
     args = parse_args()
     ensure_data_dirs(args.data_dir)
     series_ids = args.series if args.series else load_series(args.series_file)

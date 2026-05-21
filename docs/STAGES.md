@@ -1,5 +1,10 @@
 # STAGES
 
+- [x] Project root `.env` auto-load added to API/webhook CLI entry points
+- [x] Deferred previously failed symbols behind new/skipped symbols in collection queue
+- [x] Count failed Twelve Data attempts against the active key budget
+- [x] Split `src.main` symbol handling/progress updates into helper functions
+
 ## 완료된 단계
 - [x] Stage 1 MVP 기본 OHLCV 수집기(Twelve Data) 구현
 - [x] 상태 파일(`state.json`) 기반 재개 및 일일 provider 상태 관리

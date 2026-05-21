@@ -4,6 +4,7 @@ import argparse, json, os
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.request import Request, urlopen
+from src.env import load_project_env
 from src.state import utc_today
 from src.storage import ensure_data_dirs, get_db_path
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,6 +65,7 @@ def send_discord(url:str,msg:str)->None:
     with urlopen(req,timeout=15) as r: r.read()
 
 def main()->int:
+    load_project_env(ROOT)
     a=parse_args(); s=build_summary(a.data_dir); out=a.output or a.data_dir/"logs"/"daily"/f"{s['date']}.json"; s['summary_path']=str(save_summary(out,s))
     if a.send_discord:
         u=os.environ.get(a.discord_webhook_env,"")

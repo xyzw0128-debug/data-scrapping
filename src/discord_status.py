@@ -11,6 +11,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from src.env import load_project_env
 from src.state import utc_today
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -103,6 +104,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    load_project_env(ROOT)
     args = parse_args()
     webhook = os.environ.get(args.discord_webhook_env, "")
     if not webhook:

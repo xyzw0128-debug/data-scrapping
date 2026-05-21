@@ -31,12 +31,12 @@ class ProviderConfig:
     def resolved_key_envs(self) -> list[str]:
         """Return the ordered list of API key env var names for this provider.
 
-        Prefers api_key_envs if set, otherwise falls back to [api_key_env].
+        Prefers api_key_envs if set, then keeps api_key_env as a compatibility fallback.
         Deduplicates while preserving order.
         """
         envs: list[str] = []
         seen: set[str] = set()
-        candidates = list(self.api_key_envs) if self.api_key_envs else [self.api_key_env]
+        candidates = [*self.api_key_envs, self.api_key_env]
         for env in candidates:
             env = env.strip()
             if env and env not in seen:

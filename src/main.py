@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from src.config import ProviderConfig, load_provider_config, load_symbols
+from src.env import load_project_env
 from src.lock import FileLock, LockHeldError
 from src.logging_utils import setup_logging
 from src.rate_limit import DailyBudget, KeyPool
@@ -27,6 +28,14 @@ from src.storage import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class TemporaryRateLimitError(Exception):
+    """Temporary per-minute provider limit; retry with the same key later."""
+
+
+class ApiCreditsExhaustedError(Exception):
+    """Daily provider credits exhausted; rotate away from the current key."""
 
 
 def parse_args() -> argparse.Namespace:
@@ -112,11 +121,11 @@ def choose_pending_symbols(symbols: list[str], state: dict, provider: str, max_s
         if not force and provider_details.get("last_success_date") == utc_today():
             continue
         status = provider_details.get("status")
-        if status == "failed":
+        if status is None:
             priority = 0
-        elif status is None:
-            priority = 1
         elif status == "skipped_rate_limit":
+            priority = 1
+        elif status == "failed":
             priority = 2
         else:
             priority = 3
@@ -134,9 +143,14 @@ def record_symbol_status(state: dict, provider: str, symbol: str, status: str, *
     provider_details.update(update)
 
 
-def is_twelve_data_rate_limit_error(error: ValueError) -> bool:
-    """Return whether a Twelve Data normalization error is a rate-limit response."""
-    return "rate limit" in str(error).lower()
+def classify_twelve_data_error(error: ValueError) -> Exception | None:
+    """Classify Twelve Data response errors into operational exceptions."""
+    msg = str(error).lower()
+    if "run out of api credits" in msg:
+        return ApiCreditsExhaustedError(str(error))
+    if "rate limit" in msg:
+        return TemporaryRateLimitError(str(error))
+    return None
 
 
 def collect_symbol(
@@ -160,13 +174,17 @@ def collect_symbol(
         logger.info("Collecting %s from %s", symbol, config.name)
         payload = fetch_json(url, rate_limiter=rate_limiter)
         last_raw_path = save_raw_json(data_dir, config.name, symbol, payload)
+
         try:
             rows = normalize_twelve_data_ohlcv(payload)
         except ValueError as exc:
-            if attempt == 0 and is_twelve_data_rate_limit_error(exc):
+            classified = classify_twelve_data_error(exc)
+            if attempt == 0 and isinstance(classified, TemporaryRateLimitError):
                 logger.warning("Rate-limit response for %s; sleeping 60 seconds before one retry", symbol)
                 time.sleep(60)
                 continue
+            if classified is not None:
+                raise classified from exc
             raise
 
         if not rows:
@@ -175,6 +193,95 @@ def collect_symbol(
         return "done", len(rows), f"raw={last_raw_path} db={db_path}"
 
     raise ValueError(f"No OHLCV rows found in response after retry; raw={last_raw_path}")
+
+
+def update_current_run_state(state: dict, summary: dict, last_symbol: str | None) -> None:
+    state["current_run"] = {
+        "started_at": summary["started_at"],
+        "processed": summary["processed"],
+        "failed": summary["failed"],
+        "skipped_rate_limit": summary["skipped_rate_limit"],
+        "last_symbol": last_symbol,
+        "updated_at": utc_now_iso(),
+    }
+
+
+def record_rate_limit_skip(state: dict, summary: dict, provider: str, symbol: str, reason: str) -> None:
+    record_symbol_status(state, provider, symbol, "skipped_rate_limit", reason=reason)
+    summary["skipped_rate_limit"] += 1
+
+
+def handle_symbol(
+    args: argparse.Namespace,
+    config: ProviderConfig,
+    state: dict,
+    summary: dict,
+    key_pool: KeyPool,
+    symbol: str,
+    logger: logging.Logger,
+    rate_limiter: PerMinuteRateLimiter,
+) -> None:
+    key_slots_count = len([slot for slot in key_pool._slots if slot[0]]) or 1
+    symbol_handled = False
+
+    for _key_attempt in range(key_slots_count):
+        slot = key_pool.current_slot()
+        if not args.dry_run and slot is None:
+            record_rate_limit_skip(state, summary, config.name, symbol, "all_keys_exhausted")
+            symbol_handled = True
+            break
+
+        if args.dry_run:
+            api_key = ""
+            budget: DailyBudget | None = None
+        else:
+            api_key, budget = slot  # type: ignore[misc]
+            decision = budget.can_spend(1)
+            if not decision.allowed:
+                slot = key_pool.current_slot()
+                if slot is None:
+                    record_rate_limit_skip(state, summary, config.name, symbol, "all_keys_exhausted")
+                    symbol_handled = True
+                    break
+                api_key, budget = slot
+
+        try:
+            status, row_count, note = collect_symbol(
+                config, args.data_dir, symbol, api_key, args.dry_run, logger, rate_limiter,
+            )
+            if budget is not None:
+                budget.spend(1)
+            record_symbol_status(state, config.name, symbol, status, rows=row_count, note=note)
+            summary["processed"] += 1
+            summary["symbols"].append({"symbol": symbol, "status": status, "rows": row_count})
+            symbol_handled = True
+            break
+
+        except ApiCreditsExhaustedError:
+            if budget is not None:
+                budget.force_exhaust()
+            logger.warning("Daily credits exhausted for current key, rotating to next key for symbol %s", symbol)
+            continue
+
+        except TemporaryRateLimitError:
+            if budget is not None:
+                budget.spend(1)
+            logger.warning("Temporary rate limit for %s; sleeping 60 seconds before retry", symbol)
+            time.sleep(60)
+            continue
+
+        except Exception as exc:
+            if budget is not None:
+                budget.spend(1)
+            record_symbol_status(state, config.name, symbol, "failed", error=str(exc))
+            summary["failed"] += 1
+            summary["symbols"].append({"symbol": symbol, "status": "failed", "error": str(exc)})
+            symbol_handled = True
+            logger.exception("Failed to collect %s", symbol)
+            break
+
+    if not symbol_handled:
+        record_rate_limit_skip(state, summary, config.name, symbol, "all_keys_exhausted_after_rotation")
 
 
 def run_collection(args: argparse.Namespace, logger: logging.Logger) -> dict:
@@ -188,7 +295,7 @@ def run_collection(args: argparse.Namespace, logger: logging.Logger) -> dict:
 
     state = load_state(args.state)
 
-    # Build KeyPool — each key gets its own daily state bucket.
+    # Build KeyPool; each key gets its own daily state bucket.
     key_pool = KeyPool.from_env(config, state)
 
     if not args.dry_run and key_pool.current_slot() is None:
@@ -226,15 +333,8 @@ def run_collection(args: argparse.Namespace, logger: logging.Logger) -> dict:
     }
 
     # Initialize real-time progress entry in state (current_run)
-    last_symbol = None  # tracked directly — no need to re-read from state
-    state["current_run"] = {
-        "started_at": summary["started_at"],
-        "processed": 0,
-        "failed": 0,
-        "skipped_rate_limit": 0,
-        "last_symbol": None,
-        "updated_at": utc_now_iso(),
-    }
+    last_symbol = None  # tracked directly; no need to re-read from state
+    update_current_run_state(state, summary, None)
     save_state(args.state, state)
 
     logger.info(
@@ -244,112 +344,19 @@ def run_collection(args: argparse.Namespace, logger: logging.Logger) -> dict:
     )
 
     for symbol in pending:
-        # Refresh current slot — key may have rotated since last iteration.
-        slot = key_pool.current_slot()
-        if not args.dry_run and slot is None:
-            last_symbol = symbol
-            record_symbol_status(state, config.name, symbol, "skipped_rate_limit", reason="all_keys_exhausted")
-            summary["skipped_rate_limit"] += 1
+        handle_symbol(args, config, state, summary, key_pool, symbol, logger, rate_limiter)
+        last_symbol = symbol
+        update_current_run_state(state, summary, last_symbol)
+        handled = summary["processed"] + summary["failed"] + summary["skipped_rate_limit"]
+        if handled % 5 == 0:
+            save_state(args.state, state)
 
-            state["current_run"] = {
-                "started_at": summary["started_at"],
-                "processed": summary["processed"],
-                "failed": summary["failed"],
-                "skipped_rate_limit": summary["skipped_rate_limit"],
-                "last_symbol": last_symbol,
-                "updated_at": utc_now_iso(),
-            }
-            handled = summary["processed"] + summary["failed"] + summary["skipped_rate_limit"]
-            if handled % 5 == 0:
-                save_state(args.state, state)
-
-            logger.warning("All keys exhausted; stopping at symbol %s", symbol)
+        if not args.dry_run and key_pool.current_slot() is None:
+            logger.warning("All keys exhausted; stopping collection")
             break
 
-        if args.dry_run:
-            api_key = ""
-            budget: DailyBudget | None = None
-        else:
-            api_key, budget = slot  # type: ignore[misc]
-            decision = budget.can_spend(1)
-            if not decision.allowed:
-                # This key is now exhausted; try the next one.
-                slot = key_pool.current_slot()
-                if slot is None:
-                    last_symbol = symbol
-                    record_symbol_status(state, config.name, symbol, "skipped_rate_limit", reason="all_keys_exhausted")
-                    summary["skipped_rate_limit"] += 1
-
-                    state["current_run"] = {
-                        "started_at": summary["started_at"],
-                        "processed": summary["processed"],
-                        "failed": summary["failed"],
-                        "skipped_rate_limit": summary["skipped_rate_limit"],
-                        "last_symbol": last_symbol,
-                        "updated_at": utc_now_iso(),
-                    }
-                    handled = summary["processed"] + summary["failed"] + summary["skipped_rate_limit"]
-                    if handled % 5 == 0:
-                        save_state(args.state, state)
-
-                    logger.warning("All keys exhausted; stopping at symbol %s", symbol)
-                    break
-                api_key, budget = slot
-
-        try:
-            status, row_count, note = collect_symbol(
-                config, args.data_dir, symbol, api_key, args.dry_run, logger, rate_limiter,
-            )
-            if budget is not None:
-                budget.spend(1)
-            last_symbol = symbol
-            record_symbol_status(state, config.name, symbol, status, rows=row_count, note=note)
-            summary["processed"] += 1
-            summary["symbols"].append({"symbol": symbol, "status": status, "rows": row_count})
-
-            state["current_run"] = {
-                "started_at": summary["started_at"],
-                "processed": summary["processed"],
-                "failed": summary["failed"],
-                "skipped_rate_limit": summary["skipped_rate_limit"],
-                "last_symbol": last_symbol,
-                "updated_at": utc_now_iso(),
-            }
-            handled = summary["processed"] + summary["failed"] + summary["skipped_rate_limit"]
-            if handled % 5 == 0:
-                save_state(args.state, state)
-
-        except Exception as exc:
-            if budget is not None:
-                budget.spend(1)
-            last_symbol = symbol
-            record_symbol_status(state, config.name, symbol, "failed", error=str(exc))
-            summary["failed"] += 1
-            summary["symbols"].append({"symbol": symbol, "status": "failed", "error": str(exc)})
-
-            state["current_run"] = {
-                "started_at": summary["started_at"],
-                "processed": summary["processed"],
-                "failed": summary["failed"],
-                "skipped_rate_limit": summary["skipped_rate_limit"],
-                "last_symbol": last_symbol,
-                "updated_at": utc_now_iso(),
-            }
-            handled = summary["processed"] + summary["failed"] + summary["skipped_rate_limit"]
-            if handled % 5 == 0:
-                save_state(args.state, state)
-
-            logger.exception("Failed to collect %s", symbol)
-
     # End of loop: ensure final progress is saved before moving current_run to runs
-    state["current_run"] = {
-        "started_at": summary["started_at"],
-        "processed": summary["processed"],
-        "failed": summary["failed"],
-        "skipped_rate_limit": summary["skipped_rate_limit"],
-        "last_symbol": last_symbol,
-        "updated_at": utc_now_iso(),
-    }
+    update_current_run_state(state, summary, last_symbol)
     save_state(args.state, state)
 
     # Prepare final summary and store in runs (only completed runs)
@@ -374,6 +381,7 @@ def run_collection(args: argparse.Namespace, logger: logging.Logger) -> dict:
 
 
 def main() -> int:
+    load_project_env(ROOT)
     args = parse_args()
     logger = setup_logging(args.data_dir / "logs", args.verbose)
 

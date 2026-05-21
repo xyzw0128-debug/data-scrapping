@@ -41,7 +41,10 @@ class DailyBudget:
 
     def spend(self, cost: int = 1) -> None:
         self.provider_state["calls_used_today"] = self.calls_used + cost
-
+        
+    def force_exhaust(self) -> None:
+        """일일 크레딧 소진 시 내부 카운터를 강제로 한도까지 올려 다음 키로 로테이션되게 함."""
+        self.provider_state["calls_used_today"] = self.config.daily_limit
 
 class KeyPool:
     """Manage multiple API keys with sequential exhaustion strategy.
@@ -75,12 +78,20 @@ class KeyPool:
         Each key gets its own state bucket:
         ``state["providers"]["{provider_name}:key{index}"]``
         """
+        from pathlib import Path
+        from src.env import load_project_env
         from src.state import ensure_daily_provider_state
 
+        load_project_env(Path(__file__).resolve().parents[1])
         key_envs = config.resolved_key_envs()
         slots: list[tuple[str, DailyBudget]] = []
+        seen_api_keys: set[str] = set()
         for index, env_name in enumerate(key_envs):
             api_key = os.environ.get(env_name, "")
+            if api_key:
+                if api_key in seen_api_keys:
+                    continue
+                seen_api_keys.add(api_key)
             state_key = f"{config.name}:key{index}"
             provider_state = ensure_daily_provider_state(
                 state, state_key, config.daily_limit, config.daily_reserve

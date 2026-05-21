@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from src.config import load_symbols
+from src.env import load_project_env
 from src.state import utc_now_iso
 from src.storage import ensure_data_dirs, save_raw_json, upsert_news_db
 
@@ -115,6 +116,7 @@ def collect_symbol_news(
 
 
 def main() -> int:
+    load_project_env(ROOT)
     args = parse_args()
     ensure_data_dirs(args.data_dir)
     symbols = args.symbol if args.symbol else load_symbols(args.symbols)
