@@ -172,6 +172,20 @@ def render_key_pool(slots: list[dict], limits: dict[str, int]) -> list[str]:
         return [c(C.DIM, "  키 정보 없음")]
     lines = []
     daily_limit = limits.get("twelve_data", 800)
+
+    # 현재 사용 중인 키 찾기 (잔량 있는 첫 번째 키)
+    active_index = None
+    for slot in slots:
+        d = slot["data"]
+        used = int(d.get("calls_used_today", 0))
+        limit = int(d.get("daily_limit", daily_limit))
+        reserve = int(d.get("daily_reserve", 0))
+        usable = max(0, limit - reserve)
+        remaining = max(0, usable - used)
+        if remaining > 0:
+            active_index = slot["index"]
+            break
+
     for slot in slots:
         d = slot["data"]
         used = int(d.get("calls_used_today", 0))
@@ -180,7 +194,7 @@ def render_key_pool(slots: list[dict], limits: dict[str, int]) -> list[str]:
         usable = max(0, limit - reserve)
         remaining = max(0, usable - used)
         pct = used / usable * 100 if usable else 100.0
-        # 색상
+
         if remaining == 0:
             bar_color = C.RED
             status = c(C.RED, "소진")
@@ -190,11 +204,15 @@ def render_key_pool(slots: list[dict], limits: dict[str, int]) -> list[str]:
         else:
             bar_color = C.BGRN
             status = c(C.BGRN, "정상")
+
         bar = progress_bar(used, usable, width=20, color=bar_color)
         idx_str = c(C.BLU, f"KEY{slot['index']}")
-        lines.append(f"  {idx_str} {bar}  {used}/{usable}  {status}")
-    return lines
 
+        # 현재 사용 중인 키에 표시 추가
+        active_marker = c(C.BGRN, " ◀ 사용중") if slot["index"] == active_index else ""
+
+        lines.append(f"  {idx_str} {bar}  {used}/{usable}  {status}{active_marker}")
+    return lines
 
 # ── 최근 실패 심볼 ─────────────────────────────────────────────────────────────
 def recent_failures(state: dict, n: int = 5) -> list[str]:
