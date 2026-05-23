@@ -146,7 +146,9 @@ def record_symbol_status(state: dict, provider: str, symbol: str, status: str, *
 def classify_twelve_data_error(error: ValueError) -> Exception | None:
     """Classify Twelve Data response errors into operational exceptions."""
     msg = str(error).lower()
-    if "run out of api credits" in msg:
+    if "current minute" in msg:
+        return TemporaryRateLimitError(str(error))
+    if "for the day" in msg:
         return ApiCreditsExhaustedError(str(error))
     if "rate limit" in msg:
         return TemporaryRateLimitError(str(error))

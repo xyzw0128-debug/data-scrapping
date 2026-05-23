@@ -10,7 +10,7 @@ twelve_data:
   api_key_envs: TWELVE_DATA_API_KEY_1,TWELVE_DATA_API_KEY_2,TWELVE_DATA_API_KEY_3
   daily_limit: 800
   daily_reserve: 100
-  per_minute_limit: 8
+  per_minute_limit: 7
   max_symbols_per_run: 700
   base_url: https://api.twelvedata.com/time_series
   interval: 1day
