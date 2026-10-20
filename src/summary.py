@@ -1,10 +1,11 @@
-"""Daily summary and Raspberry Pi healthcheck helper."""
+"""Daily summary and host healthcheck helper."""
 from __future__ import annotations
 import argparse, json, os
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.request import Request, urlopen
 from src.env import load_project_env
+from src.lock import LockHeldError, lock_held_exit, pipeline_lock
 from src.state import utc_today
 from src.storage import ensure_data_dirs, get_db_path
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,11 +24,20 @@ def read_state_summary(data_dir: Path) -> dict[str, object]:
     state=json.loads(path.read_text(encoding='utf-8')); providers=state.get('providers',{}) if isinstance(state,dict) else {}; runs=state.get('runs',[]) if isinstance(state,dict) else []
     return {"exists": True,"providers": providers,"run_count_kept": len(runs) if isinstance(runs,list) else 0,"last_run": runs[-1] if isinstance(runs,list) and runs else None}
 
-def read_cpu_temp_c():
-    p=Path('/sys/class/thermal/thermal_zone0/temp')
-    if not p.exists(): return None
-    try: return round(int(p.read_text(encoding='utf-8').strip())/1000,1)
-    except: return None
+CPU_SENSOR_NAMES = ("k10temp", "coretemp", "zenpower", "cpu_thermal")
+
+def read_cpu_temp_c(hwmon_root: Path = Path('/sys/class/hwmon'), thermal_zone: Path = Path('/sys/class/thermal/thermal_zone0/temp')):
+    """CPU temperature: the hwmon CPU sensor (k10temp on this Ryzen host), else thermal_zone0."""
+    candidates = []
+    for name_file in sorted(hwmon_root.glob('hwmon*/name')):
+        try: name = name_file.read_text(encoding='utf-8').strip()
+        except OSError: continue
+        if name in CPU_SENSOR_NAMES: candidates.append(name_file.parent / 'temp1_input')
+    candidates.append(thermal_zone)
+    for p in candidates:
+        try: return round(int(p.read_text(encoding='utf-8').strip())/1000,1)
+        except (OSError, ValueError): continue
+    return None
 
 def read_disk_summary(data_dir: Path)->dict[str,object]:
     u=os.statvfs(data_dir); total=u.f_frsize*u.f_blocks; free=u.f_frsize*u.f_bavail; used=total-free
@@ -40,20 +50,26 @@ def _db_counts(data_dir: Path)->dict[str,object]:
     con=duckdb.connect(str(db), read_only=True)
     try:
         tables={k:con.execute(f"SELECT COUNT(*) FROM {k}").fetchone()[0] for k in ["ohlcv","indicators","macro","news"]}
+        has_runs=con.execute("SELECT count(*) FROM duckdb_tables() WHERE table_name = 'collection_runs'").fetchone()[0]
+        last_run=None
+        if has_runs:
+            row=con.execute("SELECT run_id, phase, CAST(session_date AS VARCHAR), status, core_expected, core_ok, fred_expected, fred_ok, finished_at FROM collection_runs ORDER BY finished_at DESC LIMIT 1").fetchone()
+            if row: last_run=dict(zip(["run_id","phase","session_date","status","core_expected","core_ok","fred_expected","fred_ok","finished_at"], row))
     finally: con.close()
-    return {"db_path": str(db), "exists": True, "tables": tables}
+    return {"db_path": str(db), "exists": True, "tables": tables, "last_collection_run": last_run}
 
 def build_summary(data_dir: Path)->dict[str,object]:
     ensure_data_dirs(data_dir); (data_dir/"logs"/"daily").mkdir(parents=True,exist_ok=True)
-    raw_json_count=sum(1 for i in (data_dir/"raw").glob("**/*.json") if i.is_file())
+    raw_json_count=sum(1 for i in (data_dir/"raw").glob("**/*.json*") if i.is_file())
     return {"generated_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace('+00:00','Z'),"date": utc_today(),"state": read_state_summary(data_dir),"files": {"raw_json_count": raw_json_count,"db": _db_counts(data_dir)},"hardware": {"disk": read_disk_summary(data_dir),"cpu_temp_c": read_cpu_temp_c()}}
 
 def save_summary(path:Path, summary:dict[str,object])->Path:
     path.parent.mkdir(parents=True,exist_ok=True); tmp=path.with_suffix(path.suffix+'.tmp'); tmp.write_text(json.dumps(summary,ensure_ascii=False,indent=2,sort_keys=True)+"\n",encoding='utf-8'); os.replace(tmp,path); return path
 
 def format_discord_message(summary:dict[str,object])->str:
-    t=summary['files']['db']['tables']; d=summary['hardware']['disk']
-    return f"[data-scrapping] {summary['date']} summary\nraw_json={summary['files']['raw_json_count']} ohlcv={t['ohlcv']} indicators={t['indicators']} macro={t['macro']} news={t['news']}\ndisk_free_gb={d['free_gb']} cpu_temp_c={summary['hardware']['cpu_temp_c']}"
+    t=summary['files']['db']['tables']; d=summary['hardware']['disk']; r=summary['files']['db'].get('last_collection_run') or {}
+    run=f"\nrun={r.get('status')} session={r.get('session_date')} core={r.get('core_ok')}/{r.get('core_expected')} fred={r.get('fred_ok')}/{r.get('fred_expected')}" if r else ""
+    return f"[data-scrapping] {summary['date']} summary\nraw_json={summary['files']['raw_json_count']} ohlcv={t['ohlcv']} indicators={t['indicators']} macro={t['macro']} news={t['news']}{run}\ndisk_free_gb={d['free_gb']} cpu_temp_c={summary['hardware']['cpu_temp_c']}"
 
 def send_discord(url:str,msg:str)->None:
     req=Request(
@@ -66,7 +82,11 @@ def send_discord(url:str,msg:str)->None:
 
 def main()->int:
     load_project_env(ROOT)
-    a=parse_args(); s=build_summary(a.data_dir); out=a.output or a.data_dir/"logs"/"daily"/f"{s['date']}.json"; s['summary_path']=str(save_summary(out,s))
+    a=parse_args()
+    try:
+        with pipeline_lock(a.data_dir): s=build_summary(a.data_dir)
+    except LockHeldError as exc:
+        return lock_held_exit(exc); out=a.output or a.data_dir/"logs"/"daily"/f"{s['date']}.json"; s['summary_path']=str(save_summary(out,s))
     if a.send_discord:
         u=os.environ.get(a.discord_webhook_env,"")
         if not u: raise RuntimeError(f"Missing Discord webhook environment variable: {a.discord_webhook_env}")

@@ -3,12 +3,17 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+# shellcheck source=scripts/lib_env.sh
+source "$ROOT_DIR/scripts/lib_env.sh"
+load_dotenv "$ROOT_DIR/.env"
 
 RCLONE_BIN="${RCLONE_BIN:-rclone}"
 RCLONE_DEST="${RCLONE_DEST:-}"
 RCLONE_DRY_RUN="${RCLONE_DRY_RUN:-0}"
 BACKUP_DATA_DIR="${BACKUP_DATA_DIR:-data}"
 BACKUP_MODE="${BACKUP_MODE:-copy}"
+# A standalone backup waits for a running collection so market.db is not copied mid-write.
+BACKUP_LOCK_WAIT_SECONDS="${BACKUP_LOCK_WAIT_SECONDS:-21600}"
 
 if [[ -z "$RCLONE_DEST" ]]; then
   echo "RCLONE_DEST is required, e.g. remote:data-scrapping" >&2
@@ -20,12 +25,16 @@ if ! command -v "$RCLONE_BIN" >/dev/null 2>&1; then
   exit 127
 fi
 
+acquire_pipeline_lock "$ROOT_DIR" "$BACKUP_LOCK_WAIT_SECONDS" || exit 2
+
 args=(
   --fast-list
   --transfers "${RCLONE_TRANSFERS:-4}"
   --checkers "${RCLONE_CHECKERS:-8}"
   --exclude "state/collector.lock"
+  --exclude "state/pipeline.lock"
   --exclude "logs/collector.log"
+  --exclude "db/.*.tmp"
 )
 
 if [[ "$RCLONE_DRY_RUN" == "1" ]]; then

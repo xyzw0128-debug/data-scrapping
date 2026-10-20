@@ -19,6 +19,8 @@ class ProviderConfig:
     daily_reserve: int = 0
     per_minute_limit: int = 0
     max_symbols_per_run: int = 0
+    # Credits one pipeline run may spend across collector phases; 0 means no run cap.
+    max_credits_per_run: int = 0
     base_url: str = ""
     interval: str = "1day"
     outputsize: int | str = 5000
@@ -112,6 +114,7 @@ def load_provider_config(path: Path, provider_name: str) -> ProviderConfig:
         daily_reserve=int(raw.get("daily_reserve", 0)),
         per_minute_limit=int(raw.get("per_minute_limit", 0)),
         max_symbols_per_run=int(raw.get("max_symbols_per_run", 0)),
+        max_credits_per_run=int(raw.get("max_credits_per_run", 0)),
         base_url=str(raw.get("base_url", "")),
         interval=str(raw.get("interval", "1day")),
         outputsize=raw.get("outputsize", 5000),

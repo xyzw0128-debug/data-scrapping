@@ -1,19 +1,24 @@
-"""Minimal Alpha Vantage daily OHLCV backup collector."""
+"""Minimal Alpha Vantage daily OHLCV backup collector.
+
+Disabled in run_daily.sh by default: it upserts into the same ohlcv table as Twelve Data,
+and TIME_SERIES_DAILY prices are not split-adjusted, so enabling it mixes price bases.
+"""
 
 from __future__ import annotations
 
 import argparse
+import copy
 import json
-import os
-import time
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from src.config import ProviderConfig, load_provider_config, load_symbols
 from src.env import load_project_env
-from src.rate_limit import DailyBudget, KeyPool
-from src.state import ensure_daily_provider_state, load_state, save_state, utc_now_iso, utc_today
+from src.lock import LockHeldError, lock_held_exit, pipeline_lock
+from src.rate_limit import KeyPool, PerMinuteRateLimiter
+from src.scheduling import choose_rotation_symbols, provider_entry, record_failure, record_skip, record_success
+from src.state import load_state, save_state, utc_now_iso, utc_today
 from src.storage import ensure_data_dirs, save_raw_json, upsert_ohlcv_db, verify_writable
 
 
@@ -45,30 +50,6 @@ def build_alpha_vantage_url(config: ProviderConfig, symbol: str, api_key: str) -
         }
     )
     return f"{config.base_url}?{query}"
-
-
-class PerMinuteRateLimiter:
-    """Track API call timestamps and sleep before exceeding a per-minute limit."""
-
-    def __init__(self, per_minute_limit: int) -> None:
-        self.per_minute_limit = per_minute_limit
-        self.call_timestamps: list[float] = []
-
-    def wait(self) -> None:
-        if self.per_minute_limit <= 0:
-            return
-
-        while True:
-            now = time.monotonic()
-            self.call_timestamps = [
-                timestamp for timestamp in self.call_timestamps if now - timestamp < 60.0
-            ]
-            if len(self.call_timestamps) < self.per_minute_limit:
-                self.call_timestamps.append(now)
-                return
-
-            sleep_seconds = max(0.0, 60.0 - (now - self.call_timestamps[0]))
-            time.sleep(sleep_seconds)
 
 
 def fetch_json(url: str, rate_limiter: PerMinuteRateLimiter | None = None) -> dict:
@@ -111,38 +92,6 @@ def normalize_alpha_vantage_ohlcv(payload: dict) -> list[dict[str, str]]:
     return rows
 
 
-def choose_pending_symbols(symbols: list[str], state: dict, provider: str, max_symbols: int, force: bool) -> list[str]:
-    """Choose symbols not yet completed today, deferring previous failures."""
-    symbol_state = state.setdefault("symbols", {})
-    pending: list[tuple[int, str]] = []
-    for symbol in symbols:
-        provider_details = symbol_state.setdefault(symbol, {}).setdefault(provider, {})
-        if not force and provider_details.get("last_success_date") == utc_today():
-            continue
-        status = provider_details.get("status")
-        if status is None:
-            priority = 0
-        elif status == "skipped_rate_limit":
-            priority = 1
-        elif status == "failed":
-            priority = 2
-        else:
-            priority = 3
-        pending.append((priority, symbol))
-    pending.sort(key=lambda item: item[0])
-    return [symbol for _, symbol in pending[:max_symbols]]
-
-
-def record_symbol_status(state: dict, provider: str, symbol: str, status: str, **extra: object) -> None:
-    """Record per-symbol Alpha Vantage status."""
-    provider_details = state.setdefault("symbols", {}).setdefault(symbol, {}).setdefault(provider, {})
-    update = {"status": status, "updated_at": utc_now_iso(), **extra}
-    if status == "done":
-        update["last_success_date"] = utc_today()
-        update["last_success_at"] = utc_now_iso()
-    provider_details.update(update)
-
-
 def collect_symbol(
     config: ProviderConfig,
     data_dir: Path,
@@ -163,9 +112,7 @@ def collect_symbol(
     return "done", len(rows), f"raw={raw_path} db={db_path}"
 
 
-def main() -> int:
-    load_project_env(ROOT)
-    args = parse_args()
+def run(args: argparse.Namespace) -> dict:
     ensure_data_dirs(args.data_dir)
     verify_writable(args.data_dir / "state")
 
@@ -173,27 +120,11 @@ def main() -> int:
     symbols = load_symbols(args.symbols)
     max_symbols = args.max_symbols if args.max_symbols is not None else config.max_symbols_per_run
     state = load_state(args.state)
+    if args.dry_run:
+        state = copy.deepcopy(state)  # dry-run never writes state
+    today = utc_today()
 
-    # Build KeyPool for sequential key rotation.
     key_pool = KeyPool.from_env(config, state)
-
-    if not args.dry_run and key_pool.current_slot() is None:
-        summary = {
-            "started_at": utc_now_iso(),
-            "finished_at": utc_now_iso(),
-            "provider": config.name,
-            "dry_run": False,
-            "status": "all_keys_exhausted",
-            "key_pool": key_pool.summary(),
-            "processed": 0,
-            "failed": 0,
-            "skipped_rate_limit": 0,
-            "symbols": [],
-        }
-        save_state(args.state, state)
-        print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
-        return 0
-
     rate_limiter = PerMinuteRateLimiter(config.per_minute_limit)
     summary = {
         "started_at": utc_now_iso(),
@@ -207,50 +138,47 @@ def main() -> int:
         "symbols": [],
     }
 
-    for symbol in choose_pending_symbols(symbols, state, config.name, max_symbols, args.force):
-        slot = key_pool.current_slot()
+    for symbol in choose_rotation_symbols(symbols, state, config.name, max_symbols, today, args.force):
+        entry = provider_entry(state, symbol, config.name)
+        slot = None if args.dry_run else key_pool.current_slot()
         if not args.dry_run and slot is None:
-            record_symbol_status(state, config.name, symbol, "skipped_rate_limit", reason="all_keys_exhausted")
+            record_skip(entry, "all_keys_exhausted")
             summary["skipped_rate_limit"] += 1
             break
-
-        if args.dry_run:
-            api_key = ""
-            budget: DailyBudget | None = None
-        else:
-            api_key, budget = slot  # type: ignore[misc]
-            decision = budget.can_spend(1)
-            if not decision.allowed:
-                slot = key_pool.current_slot()
-                if slot is None:
-                    record_symbol_status(state, config.name, symbol, "skipped_rate_limit", reason="all_keys_exhausted")
-                    summary["skipped_rate_limit"] += 1
-                    break
-                api_key, budget = slot
-
         try:
             status, row_count, note = collect_symbol(
-                config, args.data_dir, symbol, api_key, args.dry_run, rate_limiter,
+                config, args.data_dir, symbol, slot.api_key if slot else "", args.dry_run, rate_limiter,
             )
-            if budget is not None:
-                budget.spend(1)
-            record_symbol_status(state, config.name, symbol, status, rows=row_count, note=note)
+            if slot is not None:
+                slot.budget.spend(1)
+            record_success(entry, today, rows=row_count, note=note)
             summary["processed"] += 1
             summary["symbols"].append({"symbol": symbol, "status": status, "rows": row_count})
         except Exception as exc:
-            if budget is not None:
-                budget.spend(1)
-            record_symbol_status(state, config.name, symbol, "failed", error=str(exc))
+            if slot is not None:
+                slot.budget.spend(1)
+            record_failure(entry, today, str(exc))
             summary["failed"] += 1
             summary["symbols"].append({"symbol": symbol, "status": "failed", "error": str(exc)})
 
     summary["finished_at"] = utc_now_iso()
     summary["total_remaining_end"] = key_pool.total_remaining()
     summary["key_pool_end"] = key_pool.summary()
-    state.setdefault("runs", []).append(summary)
-    state["runs"] = state["runs"][-20:]
-    save_state(args.state, state)
+    if not args.dry_run:
+        state.setdefault("runs", []).append({k: v for k, v in summary.items() if k != "symbols"})
+        state["runs"] = state["runs"][-20:]
+        save_state(args.state, state)
+    return summary
 
+
+def main() -> int:
+    load_project_env(ROOT)
+    args = parse_args()
+    try:
+        with pipeline_lock(args.data_dir):
+            summary = run(args)
+    except LockHeldError as exc:
+        return lock_held_exit(exc)
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     return 1 if summary["failed"] else 0
 

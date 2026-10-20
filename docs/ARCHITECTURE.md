@@ -1,87 +1,65 @@
 # ARCHITECTURE
 
+상세 설계(예산, 완료 판정, stockpred 데이터 계약)는 `docs/DESIGN.md`에 있습니다.
+
 ## 디렉토리 구조
 
 ```text
 config/
-  fred_series.txt
-  providers.yaml
-  symbols.txt
-  symbols.txt.example
+  core_etfs.txt  fred_series.txt  providers.yaml  symbols.txt  symbols.txt.example
 data/
-  indicators/
-  logs/
-  macro/
-  news/
-  ohlcv/
-  raw/
-  state/
+  db/        market.db, market_snapshot.db
+  logs/      collector.log, runs/, daily/, validation/
+  raw/       twelve_data/{splits,all,none}/<symbol>.json.gz, fred/, finnhub_news/
+  state/     state.json, universe.json, sp500_hist.csv, fred.json, finnhub_news.json, pipeline.lock
 scripts/
-  rclone_backup.sh
-  run_daily.sh
+  install_local.sh  lib_env.sh  progress.py  rclone_backup.sh  run_daily.sh
 src/
-  __init__.py
-  alpha_vantage.py
-  config.py
-  export_dataset.py
-  finnhub_news.py
-  fred.py
-  indicators.py
-  lock.py
-  logging_utils.py
-  main.py
-  rate_limit.py
-  state.py
-  storage.py
-  summary.py
-  validate.py
-  validate_duckdb.py
-  fetch_tickers.py
 systemd/
-  data-scrapping-backup.service
-  data-scrapping-backup.timer
-  data-scrapping.env.example
-  data-scrapping.service
-  data-scrapping.timer
+  data-scrapping.service  data-scrapping.timer  data-scrapping-backup.service  data-scrapping-backup.timer
 ```
 
 ## src 모듈 역할
-- `src/main.py`: Twelve Data 기반 일일 OHLCV 수집의 기본 CLI 엔트리포인트.
-- `src/alpha_vantage.py`: Alpha Vantage 일일 OHLCV 백업 수집기.
-- `src/finnhub_news.py`: Finnhub company news 수집. 심볼 로테이션과 심볼별 재개 상태(`data/state/finnhub_news.json`) 관리, DuckDB `news` 테이블 업서트.
-- `src/export_dataset.py`: `market.db`를 읽기 전용으로 붙여 시점 누수 없는 ML 데이터셋(Parquet 피처/라벨, chat JSONL, metadata.json)을 `data/datasets/<name>/`에 생성.
-- `src/fetch_tickers.py`: Twelve Data stocks endpoint에서 exchange별 티커 목록을 받아 `config/symbols.txt`를 갱신.
-- `src/fred.py`: FRED 거시 지표 series 수집 및 CSV 저장.
-- `src/indicators.py`: DuckDB OHLCV 기반 기술지표(SMA/RSI/MACD) 계산. 기본은 OHLCV `updated_at`이 지표보다 최신인 심볼만 배치로 재계산.
-- `src/summary.py`: 수집 결과/상태/디스크/CPU 온도 일일 요약 생성(옵션 Discord 전송).
-- `src/validate.py`: OHLCV/indicators/macro/news CSV 경량 검증 리포트 생성.
-- `src/validate_duckdb.py`: DuckDB SQL 기반 OHLCV 무결성(중복/가격 범위/거래량) 검증 리포트 생성.
-- `src/config.py`: symbols/providers 설정 로딩 및 provider 설정 객체화.
-- `src/rate_limit.py`: 일일 예산/리저브 기반 API 호출 가능 여부 판단.
-- `src/state.py`: `state.json` 기본 스키마, 로드/저장, provider 일일 상태 리셋.
-- `src/storage.py`: raw JSON 저장, OHLCV 정규화, DuckDB 스키마/타입 뷰 생성, 배치 upsert(`bulk_upsert`), 런 요약 저장.
-- `src/lock.py`: 중복 실행 방지 파일 락. 기록된 PID가 종료된 lock은 자동 교체.
-- `src/logging_utils.py`: 콘솔 + 파일 로깅 설정.
-- `src/__init__.py`: 패키지 메타 정보(설명 문자열).
+- `src/main.py`: Twelve Data 일봉 수집 CLI. `--phase core`(핵심 종목: `adjust=splits`+`adjust=all`, 분할 이력 보충) / `rotation`(순환 종목) / `all`.
+- `src/twelve_data.py`: Twelve Data 클라이언트. 엔드포인트별 크레딧 비용, 오류 분류(분당 한도/일일 소진/종목 없음), 키 전환, `/api_usage` 동기화.
+- `src/rate_limit.py`: `PerMinuteRateLimiter`, 키별 일일 예산(`DailyBudget`), 순차 키 로테이션(`KeyPool`, UTC 날짜 재확인), 실행당 크레딧 상한(`RunCreditCap`).
+- `src/scheduling.py`: 순환 수집 순서(미수집 → 오래된 순)와 실패 재시도 대기(1·2·4·8·16·30일, 404는 30일).
+- `src/universe.py`: 핵심/순환 종목 목록, S&P 500 구성종목(fja05680 CSV), NASDAQ 목록, 상장폐지 표시. `python -m src.universe`로 갱신.
+- `src/market_calendar.py`: NYSE 정기 휴장일과 기준 거래일(마지막으로 끝난 정규장) 계산.
+- `src/corporate_actions.py`: `adjust=none`/`adjust=splits` 종가 비율로 분할 이벤트 계산, 분할 기준 변경 감지.
+- `src/snapshot.py`: 완료 판정(`complete/partial/failed`), `symbol_status`·`collection_runs` 기록, `market_snapshot.db` 원자적 교체.
+- `src/fred.py`: FRED 관측값(`first_seen_at` 보존 업서트), 시리즈 메타(`series_meta`, 권리 문구 감지), `data/state/fred.json`.
+- `src/finnhub_news.py`: Finnhub 뉴스. 잘린 응답 페이지 나눠 받기, 종목별 이어받기 창, 핵심 종목 우선.
+- `src/indicators.py`: OHLCV가 바뀐 종목만 SMA/RSI/MACD 재계산(기본은 OHLCV가 있는 모든 종목).
+- `src/storage.py`: DuckDB 스키마·버전 마이그레이션, 뷰(`*_typed`, `prices_daily`), 배치 업서트, 종목 통째 교체, 분할 이벤트 저장, gzip 원본 저장.
+- `src/lock.py`: 파이프라인 잠금(flock). `run_daily.sh`가 잡으면 하위 CLI는 상속하고, 단독 실행 CLI는 직접 잡습니다.
+- `src/export_dataset.py`: 시점 누수 없는 ML 데이터셋 내보내기(개인용 FRED 시리즈 기본 제외).
+- `src/summary.py`: 일일 요약(테이블 건수, 마지막 수집 상태, 디스크, CPU 온도 `k10temp`).
+- `src/validate_duckdb.py`: OHLCV 중복/범위 검증. `src/validate.py`: 과거 CSV 검증(호환용).
+- `src/alpha_vantage.py`: Alpha Vantage 백업 수집기(기본 꺼짐; 같은 `ohlcv` 테이블에 덮어쓰고 분할 미반영 가격이라 켜면 기준이 섞임).
+- `src/fetch_tickers.py`: 단독 티커 목록 갱신 도구(일상 운영은 `src.universe`가 대신함).
+- `src/discord_status.py`: Discord 실시간 상태 메시지.
+- `src/config.py`, `src/state.py`, `src/env.py`, `src/logging_utils.py`: 설정·상태 파일·`.env`·로그 공용 모듈.
 
 ## 데이터 흐름
-수집 → raw JSON → CSV → indicators → summary → validation
 
-- `fetch_tickers.py`가 필요 시 Twelve Data stocks endpoint에서 티커 목록을 갱신합니다.
-- 수집기(`main.py`, `alpha_vantage.py`, `fred.py`, `finnhub_news.py`)가 API에서 데이터를 가져옵니다.
-- 원본 응답은 `data/raw/<provider>/`에 JSON으로 저장됩니다.
-- 정규화된 CSV가 도메인별(`data/ohlcv`, `data/macro`, `data/news`)로 저장됩니다.
-- `indicators.py`가 `data/ohlcv/*.csv`를 읽어 `data/indicators/*.csv`를 생성합니다.
-- `summary.py`가 상태/파일/하드웨어 정보를 `data/logs/daily/<date>.json`으로 요약합니다.
-- `validate.py`가 CSV 품질 검증 결과를 `data/logs/validation/latest.json`에 기록합니다.
-- 현재 저장소는 CSV 대신 DuckDB 단일 DB(`data/db/market.db`)의 `ohlcv`/`indicators`/`macro`/`news` 테이블을 사용합니다.
-- `export_dataset.py`가 DB를 읽어 `data/datasets/<name>/`에 학습용 데이터셋을 만듭니다(수집 파이프라인과 별도로 필요할 때 실행).
+종목 목록 갱신 → 핵심 일봉 → FRED → 스냅숏(core) → 순환 일봉 → 지표 → 뉴스 → 요약·검증 → 스냅숏(full)
+
+- 수집기는 원본 응답을 `data/raw/<provider>/`에 종목·시리즈별 최신 1개(gzip)로 남깁니다.
+- 정규화된 데이터는 DuckDB 단일 파일(`data/db/market.db`)의 `ohlcv`, `indicators`, `macro`, `news`, `corporate_actions`, `series_meta` 테이블에 저장됩니다.
+- 스냅숏 단계가 `symbol_status`, `collection_runs`를 기록하고 `market_snapshot.db`로 복사합니다. stockpred는 스냅숏만 읽습니다.
 
 ## 상태 파일 구조 요약
-기본 상태 파일 경로는 `data/state/state.json`이며 핵심 키는 다음과 같습니다.
-- `schema_version`: 상태 스키마 버전.
-- `providers`: provider별 일일 사용 상태.
-  - 예: `date`, `calls_used_today`, `daily_limit`, `daily_reserve`, `last_reset_utc`.
-- `symbols`: 심볼별 provider 처리 상태.
-  - 예: `status`, `updated_at`, `last_success_date`, `last_success_at`, `rows`, `error`, `note`.
-- `runs`: 최근 실행 요약 배열(최대 20개 유지).
+
+`data/state/state.json`
+- `schema_version`
+- `providers`: `twelve_data:key{n}`별 `date`, `calls_used_today`(크레딧), `daily_limit`, `daily_reserve`, `last_reset_utc`, `server_synced`.
+- `symbols.<symbol>.twelve_data`: `status`(`done`/`failed`/`not_found`/`skipped_rate_limit`), `last_success_date`, `last_success_at`, `last_bar_date`, `core_session`, `fail_count`, `next_retry_date`, `splits_checked_at`, `splits_stale`, `split_events`, `rows`, `error`, `note`.
+- `pipeline_run`: 실행 ID별 사용 크레딧(핵심·순환 단계가 상한을 나눠 씀).
+- `current_run`: 진행 중인 단계(`phase`, `planned`, `processed` 등). 정상 종료 시 제거.
+- `runs`: 최근 실행 요약 20개(종목 목록 제외).
+
+그 밖의 상태 파일
+- `universe.json`: S&P 500 목록과 기준일, `former_core`, `delisted`, 마지막 갱신 시각.
+- `fred.json`: 시리즈별 `last_success_at`(완료 판정에 사용).
+- `finnhub_news.json`: 종목별 `last_to`, 이어받기 창(`window_from`, `window_to`, `cursor_to`), `last_attempt_at`.

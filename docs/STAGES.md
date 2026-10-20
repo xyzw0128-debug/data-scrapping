@@ -45,12 +45,38 @@
 - [x] 종료된 PID가 남긴 `collector.lock`을 다음 실행에서 자동 정리
 - [x] ML 데이터셋 내보내기(`src.export_dataset`): 시점 누수 방지 피처/라벨 Parquet + LLM 파인튜닝용 chat JSONL + metadata.json
 
-## 다음 작업
+## 2026-10-20 NucBox 이전 및 핵심 종목 수집 개편 (`docs/DESIGN.md`)
+- [x] 설계 문서(`docs/DESIGN.md`) 작성: 핵심/순환 수집, 크레딧 예산, 완료 판정, stockpred 데이터 계약
+- [x] 공통 파이프라인 잠금(`data/state/pipeline.lock`, flock): `run_daily.sh`와 데이터를 쓰는 모든 CLI가 공유, 죽은 프로세스의 잠금이 남지 않음
+- [x] dry-run이 `state.json`·상태 파일·DB에 아무것도 쓰지 않도록 수정(`dry_run` 상태 오염 원인 제거)
+- [x] Twelve Data 크레딧 기준 예산: 엔드포인트별 비용, `/api_usage` 서버 사용량 동기화, 실행 중 UTC 날짜 변경 반영, 실행당 크레딧 상한(`max_credits_per_run: 1400`)
+- [x] 순환 수집 순서를 상태값 기준에서 "미수집 → 마지막 성공이 오래된 순"으로 변경(같은 A~B 700종목만 반복 수집하던 문제 해결)
+- [x] 실패 재시도 대기(1·2·4·8·16·30일, 404는 30일), 4xx 응답 즉시 재요청 제거
+- [x] 종목 목록 자동 갱신(`src.universe`): 핵심 526(ETF 23 + S&P 500), NASDAQ 목록, 상장폐지 표시(행 보존), S&P 제외 종목 순환 편입
+- [x] 종목 통째 교체(옛 분할 기준 행·지표 행 삭제), 핵심 종목 `adj_close`(`adjust=all`), 분할 이벤트(`adjust=none` 비율) `corporate_actions`
+- [x] 기준 거래일(NYSE 휴장일 포함) 계산, 장중 미완성 봉 저장 금지
+- [x] 완료 판정(`complete/partial/failed`)과 `symbol_status`·`collection_runs` 기록, `market_snapshot.db` 원자적 교체, `prices_daily` 뷰
+- [x] DuckDB 스키마 버전 2 마이그레이션(`ohlcv.adj_close`, `macro.first_seen_at`, 새 테이블·뷰)
+- [x] Finnhub 잘린 응답 페이지 나눠 받기, 종목별 이어받기 창, 핵심 종목 우선, 전체 종목 대상(`FINNHUB_LIMIT` 비우면 전체)
+- [x] FRED 5개 추가(DGS2, BAA10Y, VIXCLS, DTB3, IR3TIB01KRM156N), `first_seen_at`, `series_meta`(권리 제한 시리즈 개인용 표시, 데이터셋 내보내기 기본 제외)
+- [x] 원본 응답을 종목·조정 방식별 최신 1개 gzip으로 저장(하루 1GB 증가 방지)
+- [x] 실행 환경: `run_daily.sh`가 `.env`와 `.venv/bin/python`을 사용, systemd 사용자 유닛(`Mon..Fri 16:10 America/New_York`), `install_local.sh`, 루트 `.env.example`; `install_pi.sh`·`/etc/data-scrapping.env` 제거
+- [x] `summary.py` CPU 온도를 hwmon `k10temp`에서 읽음, 마지막 수집 상태 표시
+- [x] `progress.py`: 종목 수·계획 수를 실제 값으로, UTC 날짜, 단계·핵심 종목 완료율 표시, 파이프라인 잠금으로 실행 여부 판단
+- [x] 실제 API 검증: 종목 목록 갱신, 핵심 3종목(NVDA·BRK.B·SPY)·순환 1종목, FRED 16개, 뉴스 2종목(페이지 나눠 받기), 스냅숏 동시 읽기, 지표 3,151종목 재계산, Yahoo 캐시 대조
+- [x] 리뷰 반영(2026-10-20): 사용량 동기화 실패 키 제외·고정 키 예산 확인, 불확실한 시도 크레딧 차감, 완료 판정에 분할 이력·종목 목록 초기화 검사 추가(스키마 버전 3), 종목 목록 `--dry-run` 무네트워크(`--check` 분리)
+- [x] systemd 사용자 타이머 켜기(`scripts/install_local.sh`, 첫 실행 2026-10-21 05:10 KST)
+- [x] stockpred 스냅숏 어댑터(`SnapshotSource`, `data.price_source: snapshot`로 선택)와 Yahoo 대조 스크립트(stock_test `feat/snapshot-price-source` 브랜치): 핵심 3종목 허용 오차 통과
+
+## 이전 다음 작업
 - [x] run_daily.sh에 DuckDB 검증 단계 포함
-- [x] Pi 배포 스크립트(install_pi.sh) 및 배포 가이드(DEPLOYMENT.md) 추가
+- [x] Pi 배포 스크립트(install_pi.sh) 및 배포 가이드(DEPLOYMENT.md) 추가 → 2026-10-20 `install_local.sh`로 교체
 
 ## 이후 예정 작업
 - [ ] 운영 중 축적 데이터 기준으로 검증 규칙(무결성/중복/이상치) 확장
-- [ ] SSD 마운트 경로를 config로 관리하는 방안 검토
-- [ ] 상장폐지 종목 데이터 확보 검토(현재 심볼 목록 기준이라 생존 편향 존재)
-- [ ] FRED 최초 발표값(ALFRED vintage) 기반 거시지표 시점 정렬 검토
+- [ ] 16:10 ET 직후 당일 일봉(거래량 포함) 확정 여부 확인, 필요하면 시작 시각 조정
+- [ ] 운영 수치 조정: 실행당 1,400크레딧·분당 7회(Twelve Data), 분당 50회·잘림 기준 200건(Finnhub)
+- [ ] S&P 공개 목록 반영 지연 모니터링(필요하면 `config/core_extra.txt` 사용)
+- [ ] rclone 백업 설정 후 백업 타이머 켜기
+- [ ] 상장폐지 종목 데이터 확보 검토(현재 심볼 목록 기준이라 생존 편향 존재; 2026-10-20부터는 상장폐지 종목 행을 보존)
+- [ ] FRED 최초 발표값(ALFRED vintage) 기반 거시지표 시점 정렬 검토(`first_seen_at`은 2026-10-20 이후 관측값부터 기록)

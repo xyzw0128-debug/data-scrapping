@@ -1,7 +1,7 @@
 """실시간 수집 진행도 표시 스크립트 (개선판).
 
 사용법:
-    python scripts/progress.py          # 3초 갱신 (기본)
+    python scripts/progress.py          # 60초 갱신 (기본)
     python scripts/progress.py -i 5    # 5초 갱신
     python scripts/progress.py --once  # 한 번만 출력
 """
@@ -13,37 +13,38 @@ import json
 import os
 import sys
 import time
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-STATE_PATH = ROOT / "data" / "state" / "state.json"
+sys.path.insert(0, str(ROOT))
+
+from src.lock import pipeline_running  # noqa: E402
+from src.market_calendar import expected_session  # noqa: E402
+from src.universe import load_universe  # noqa: E402
+
+DATA_DIR       = ROOT / "data"
+STATE_PATH     = DATA_DIR / "state" / "state.json"
 PROVIDERS_PATH = ROOT / "config" / "providers.yaml"
 
 # ── 상수 ──────────────────────────────────────────────────────────────────────
-TOTAL_SYMBOLS = 4445          # 전체 심볼 수 (symbols.txt 기준 대략값)
-RUN_MAX_SYMBOLS = 700         # 하루 최대 처리 심볼 수
-BAR_WIDTH = 38
-REFRESH_SEC = 60
+BAR_WIDTH       = 38
+REFRESH_SEC     = 60
 
 
 # ── ANSI 컬러 ─────────────────────────────────────────────────────────────────
 class C:
-    RST   = "\033[0m"
-    BOLD  = "\033[1m"
-    DIM   = "\033[2m"
-    RED   = "\033[31m"
-    GRN   = "\033[32m"
-    YLW   = "\033[33m"
-    BLU   = "\033[34m"
-    MAG   = "\033[35m"
-    CYN   = "\033[36m"
-    WHT   = "\033[37m"
-    BRED  = "\033[91m"
-    BGRN  = "\033[92m"
-    BYLW  = "\033[93m"
-    BBLU  = "\033[94m"
-    BCYN  = "\033[96m"
+    RST  = "\033[0m"
+    BOLD = "\033[1m"
+    DIM  = "\033[2m"
+    RED  = "\033[31m"
+    BLU  = "\033[34m"
+    BRED = "\033[91m"
+    BGRN = "\033[92m"
+    BYLW = "\033[93m"
+    BBLU = "\033[94m"
+    BCYN = "\033[96m"
+
 
 def _no_color() -> bool:
     return not sys.stdout.isatty() or os.environ.get("NO_COLOR", "") != ""
@@ -69,8 +70,17 @@ def load_state() -> dict | None:
         return None
 
 
+def universe_counts() -> tuple[list[str], int]:
+    """(핵심 종목 목록, 핵심+순환 활성 종목 수). 목록 파일을 못 읽으면 ([], 0)."""
+    try:
+        universe = load_universe(DATA_DIR)
+    except Exception:
+        return [], 0
+    core = universe.core_symbols()
+    return core, len(core) + len(universe.rotation_symbols())
+
+
 def load_provider_limits() -> dict[str, int]:
-    """providers.yaml에서 daily_limit 값을 읽어온다."""
     limits: dict[str, int] = {}
     if not PROVIDERS_PATH.exists():
         return limits
@@ -117,13 +127,12 @@ def fmt_elapsed(started_at: str) -> str:
 
 
 def fmt_eta(done: int, total: int, started_at: str) -> str:
-    """남은 시간 추정 (started_at 기준 선형 보간)."""
     if done <= 0 or total <= 0:
         return "?"
     try:
         start = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
         elapsed_s = (datetime.now(UTC) - start).total_seconds()
-        rate = done / elapsed_s  # symbols/sec
+        rate = done / elapsed_s
         remaining = (total - done) / rate
         m, s = divmod(int(remaining), 60)
         h, m = divmod(m, 60)
@@ -137,7 +146,6 @@ def fmt_eta(done: int, total: int, started_at: str) -> str:
 
 
 def fmt_time(iso: str) -> str:
-    """ISO 타임스탬프를 로컬 HH:MM:SS로."""
     try:
         dt = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone()
         return dt.strftime("%H:%M:%S")
@@ -151,14 +159,12 @@ def divider(char: str = "─", width: int = 55) -> str:
 
 # ── 키풀 상태 읽기 ─────────────────────────────────────────────────────────────
 def read_key_pool(state: dict, provider: str = "twelve_data") -> list[dict]:
-    """state["providers"]에서 키 슬롯 정보를 읽어온다."""
     providers = state.get("providers", {})
     slots = []
     idx = 0
     while True:
         key = f"{provider}:key{idx}"
         if key not in providers:
-            # 단일 키 방식 fallback
             if idx == 0 and provider in providers:
                 slots.append({"index": 0, "data": providers[provider]})
             break
@@ -196,8 +202,8 @@ def render_key_pool(slots: list[dict], limits: dict[str, int]) -> list[str]:
         pct = used / usable * 100 if usable else 100.0
 
         if remaining == 0:
-            bar_color = C.RED
-            status = c(C.RED, "소진")
+            bar_color = C.BRED
+            status = c(C.BRED, "소진")
         elif pct >= 80:
             bar_color = C.BYLW
             status = c(C.BYLW, "주의")
@@ -207,12 +213,10 @@ def render_key_pool(slots: list[dict], limits: dict[str, int]) -> list[str]:
 
         bar = progress_bar(used, usable, width=20, color=bar_color)
         idx_str = c(C.BLU, f"KEY{slot['index']}")
-
-        # 현재 사용 중인 키에 표시 추가
         active_marker = c(C.BGRN, " ◀ 사용중") if slot["index"] == active_index else ""
-
         lines.append(f"  {idx_str} {bar}  {used}/{usable}  {status}{active_marker}")
     return lines
+
 
 # ── 최근 실패 심볼 ─────────────────────────────────────────────────────────────
 def recent_failures(state: dict, n: int = 5) -> list[str]:
@@ -232,8 +236,8 @@ def recent_failures(state: dict, n: int = 5) -> list[str]:
 
 # ── 오늘 통계 ─────────────────────────────────────────────────────────────────
 def today_stats(state: dict) -> tuple[int, int, int]:
-    """오늘 twelve_data 기준 성공/실패/스킵 수 반환."""
-    today = date.today().isoformat()
+    # state.json의 날짜는 UTC 기준이다(한국 시간 00:00~09:00에도 맞게 센다).
+    today = datetime.now(UTC).date().isoformat()
     symbols = state.get("symbols", {})
     done = failed = skipped = 0
     for data in symbols.values():
@@ -255,7 +259,7 @@ def today_stats(state: dict) -> tuple[int, int, int]:
 def render(state: dict | None, limits: dict[str, int]) -> None:
     W = 55
     print(divider("═", W))
-    print(c(C.BOLD + C.CYN, "  📊 data-scrapping 수집 모니터"))
+    print(c(C.BOLD + C.BCYN, "  📊 data-scrapping 수집 모니터"))
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(c(C.DIM, f"  {now_str}"))
     print(divider("═", W))
@@ -266,31 +270,43 @@ def render(state: dict | None, limits: dict[str, int]) -> None:
         return
 
     current = state.get("current_run")
+    lock_exists = pipeline_running(DATA_DIR)
+    core, total_symbols = universe_counts()
 
-    # ── 수집 중 ───────────────────────────────────────────────────────────────
-    if current:
-        processed = int(current.get("processed", 0))
-        failed    = int(current.get("failed", 0))
-        skipped   = int(current.get("skipped_rate_limit", 0))
+    # ── 수집 중 (current_run + 파이프라인 잠금 둘 다 있음) ─────────────────────
+    if current and lock_exists:
+        processed  = int(current.get("processed", 0))
+        failed     = int(current.get("failed", 0))
+        skipped    = int(current.get("skipped_rate_limit", 0))
         total_done = processed + failed + skipped
         last_sym   = current.get("last_symbol") or "-"
         started_at = current.get("started_at", "")
         updated_at = fmt_time(current.get("updated_at", ""))
         elapsed    = fmt_elapsed(started_at)
-        eta        = fmt_eta(processed, RUN_MAX_SYMBOLS, started_at)
+        planned    = int(current.get("planned") or 0) or max(total_done, 1)
+        phase      = {"core": "핵심 종목", "rotation": "순환 종목"}.get(current.get("phase"), current.get("phase") or "-")
+        eta        = fmt_eta(total_done, planned, started_at)
 
-        print(f"\n  상태   {c(C.BGRN, '● 수집 중')}")
-        print(f"  경과   {c(C.BOLD, elapsed)}   ETA {c(C.CYN, eta)}")
+        print(f"\n  상태   {c(C.BGRN, '● 수집 중')}   단계 {c(C.BOLD, phase)}")
+        print(f"  경과   {c(C.BOLD, elapsed)}   ETA {c(C.BCYN, eta)}")
         print(f"  갱신   {c(C.DIM, updated_at)}")
         print(f"  심볼   {c(C.BOLD, last_sym)}")
-
         print()
         print(c(C.DIM, "  ── 이번 실행 진행도 ──────────────────────────"))
-        print(f"  {progress_bar(total_done, RUN_MAX_SYMBOLS)}")
-        print(f"  {total_done} / {RUN_MAX_SYMBOLS}  "
+        print(f"  {progress_bar(total_done, planned)}")
+        print(f"  {total_done} / {planned}  "
               f"{c(C.BGRN, f'✓{processed}')}  "
               f"{c(C.BRED, f'✗{failed}')}  "
               f"{c(C.BYLW, f'⏭{skipped}')}")
+
+    # ── 비정상 종료 (lock 없는데 current_run 남아있음) ────────────────────────
+    elif current and not lock_exists:
+        updated_at = fmt_time(current.get("updated_at", ""))
+        print(f"\n  상태   {c(C.BYLW, '⚠  비정상 종료 감지')}")
+        print(f"  {c(C.DIM, '└ 파이프라인 잠금 없음 — 프로세스가 중간에 종료된 것 같습니다')}")
+        print(f"  마지막 갱신   {c(C.DIM, updated_at)}")
+        print()
+        print(c(C.DIM, "  다음 실행이 이어서 처리합니다(state.json 기준)."))
 
     # ── 대기 중 ───────────────────────────────────────────────────────────────
     else:
@@ -312,11 +328,20 @@ def render(state: dict | None, limits: dict[str, int]) -> None:
                   f"{c(C.BYLW, f'⏭{ls}')}")
 
     # ── 오늘 전체 진행도 ───────────────────────────────────────────────────────
+    if core:
+        session = expected_session(datetime.now(UTC)).isoformat()
+        symbols = state.get("symbols", {})
+        core_ok = sum(1 for s in core if (symbols.get(s, {}).get("twelve_data") or {}).get("core_session") == session)
+        print()
+        print(c(C.DIM, f"  ── 핵심 종목 (기준 거래일 {session}) ──────────────"))
+        print(f"  {progress_bar(core_ok, len(core), color=C.BCYN)}")
+        print(f"  {core_ok} / {len(core)} 종목 완료")
+
     done_today, fail_today, skip_today = today_stats(state)
     print()
-    print(c(C.DIM, "  ── 오늘 전체 진행도 ──────────────────────────"))
-    print(f"  {progress_bar(done_today, TOTAL_SYMBOLS, color=C.BBLU)}")
-    print(f"  {done_today} / {TOTAL_SYMBOLS} 심볼 성공  "
+    print(c(C.DIM, "  ── 오늘(UTC) 전체 진행도 ─────────────────────"))
+    print(f"  {progress_bar(done_today, total_symbols, color=C.BBLU)}")
+    print(f"  {done_today} / {total_symbols} 심볼 성공  "
           f"{c(C.BRED, f'✗{fail_today}')}  "
           f"{c(C.BYLW, f'⏭{skip_today}')}")
 

@@ -1,10 +1,11 @@
 [Unit]
-Description=Run personal market data collector daily
+Description=Run data-scrapping after the US market close (16:10 New York time, Mon-Fri)
 
 [Timer]
-OnCalendar=*-*-* 22:30:00 UTC
+# New York time zone: follows US daylight saving (21:10 UTC in winter, 20:10 UTC in summer).
+OnCalendar=Mon..Fri 16:10 America/New_York
+# A run missed while the PC was off starts at boot; bars of an unfinished session are not stored.
 Persistent=true
-RandomizedDelaySec=10m
 
 [Install]
 WantedBy=timers.target

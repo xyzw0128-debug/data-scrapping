@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 
 from src.config import load_provider_config, load_symbols
 from src.env import load_project_env
+from src.lock import LockHeldError, lock_held_exit, pipeline_lock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -91,6 +92,14 @@ def merge_symbols(existing: list[str], fetched: list[str]) -> list[str]:
 def main() -> int:
     load_project_env(ROOT)
     args = parse_args()
+    try:
+        with pipeline_lock(ROOT / "data"):
+            return run(args)
+    except LockHeldError as exc:
+        return lock_held_exit(exc)
+
+
+def run(args: argparse.Namespace) -> int:
     config = load_provider_config(args.providers, args.provider)
     api_key = os.environ.get(config.api_key_env, "")
     if not api_key and not args.dry_run:
