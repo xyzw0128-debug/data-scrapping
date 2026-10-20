@@ -29,8 +29,15 @@ class FileLock:
             self._fd = os.open(self.path, flags)
         except FileExistsError as exc:
             holder = self._read_holder()
-            detail = f" Existing lock: {holder}" if holder else ""
-            raise LockHeldError(f"Collector lock is already held at {self.path}.{detail}") from exc
+            if not _holder_is_dead(holder):
+                detail = f" Existing lock: {holder}" if holder else ""
+                raise LockHeldError(f"Collector lock is already held at {self.path}.{detail}") from exc
+            # The previous run was killed without releasing the lock (e.g. its terminal was closed).
+            self.path.unlink(missing_ok=True)
+            try:
+                self._fd = os.open(self.path, flags)
+            except FileExistsError as retry_exc:
+                raise LockHeldError(f"Collector lock is already held at {self.path}.") from retry_exc
         os.write(self._fd, f"pid={os.getpid()}\n".encode("utf-8"))
         os.write(self._fd, f"path={self.path}\n".encode("utf-8"))
         os.fsync(self._fd)
@@ -56,3 +63,21 @@ class FileLock:
             return self.path.read_text(encoding="utf-8").strip()
         except OSError:
             return ""
+
+
+def _holder_is_dead(holder: str) -> bool:
+    """Return True only when the lock names a PID that no longer exists."""
+    for line in holder.splitlines():
+        if line.startswith("pid="):
+            try:
+                pid = int(line[len("pid="):])
+            except ValueError:
+                return False
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            except OSError:
+                return False
+            return False
+    return False

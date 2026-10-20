@@ -1,13 +1,26 @@
-"""Local technical indicator calculation from stored OHLCV CSV files."""
+"""Local technical indicator calculation from OHLCV rows stored in DuckDB."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from src.config import load_symbols
-from src.storage import OHLCV_FIELDS, ensure_data_dirs, load_ohlcv_rows_db, save_indicator_rows_db
+from src.state import utc_now_iso
+from src.storage import (
+    INDICATOR_COLUMNS,
+    OHLCV_FIELDS,
+    bulk_upsert,
+    connect_db,
+    ensure_data_dirs,
+    ensure_db_schema,
+    indicator_values,
+    load_ohlcv_rows_db,
+    load_ohlcv_rows_for_symbols,
+    save_indicator_rows_db,
+)
 
 
 INDICATOR_FIELDS = [
@@ -25,10 +38,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Calculate local indicators from OHLCV CSV files.")
+    parser = argparse.ArgumentParser(description="Calculate local indicators from OHLCV rows in DuckDB.")
     parser.add_argument("--symbols", type=Path, default=ROOT / "config" / "symbols.txt")
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
     parser.add_argument("--symbol", action="append", help="Calculate only this symbol; can be used multiple times")
+    parser.add_argument("--full", action="store_true", help="Recalculate every symbol instead of only symbols whose OHLCV changed")
+    parser.add_argument("--batch-size", type=int, default=200, help="Symbols loaded and written per DuckDB transaction")
     return parser.parse_args()
 
 
@@ -187,19 +202,69 @@ def calculate_for_symbol(data_dir: Path, symbol: str) -> tuple[str, int, str | N
     return "done", len(rows), str(output_path)
 
 
+def find_stale_symbols(con, symbols: list[str]) -> list[str]:
+    """Return symbols whose OHLCV rows were written after their indicators, in input order."""
+    stale = {
+        row[0]
+        for row in con.execute(
+            """
+            SELECT o.symbol
+            FROM (SELECT symbol, max(updated_at) AS updated_at FROM ohlcv GROUP BY symbol) o
+            LEFT JOIN (SELECT symbol, max(updated_at) AS updated_at FROM indicators GROUP BY symbol) i USING (symbol)
+            WHERE i.updated_at IS NULL OR o.updated_at > i.updated_at
+            """
+        ).fetchall()
+    }
+    return [symbol for symbol in symbols if symbol in stale]
+
+
+def calculate_batches(con, data_dir: Path, symbols: list[str], batch_size: int) -> list[dict[str, object]]:
+    """Calculate and store indicators for symbols, one transaction per batch."""
+    results: list[dict[str, object]] = []
+    for start in range(0, len(symbols), max(1, batch_size)):
+        batch = symbols[start : start + max(1, batch_size)]
+        rows_by_symbol = load_ohlcv_rows_for_symbols(con, batch)
+        updated_at = utc_now_iso()
+        values: list[list[str]] = []
+        for symbol in batch:
+            rows = rows_by_symbol.get(symbol, [])
+            values.extend(indicator_values(symbol, add_indicators(rows), updated_at))
+            results.append({"symbol": symbol, "status": "done", "rows": len(rows)})
+        con.begin()
+        try:
+            bulk_upsert(con, data_dir, "indicators", INDICATOR_COLUMNS, ["symbol", "date"], values)
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
+        print(f"[indicators] {min(start + len(batch), len(symbols))}/{len(symbols)} symbols", file=sys.stderr, flush=True)
+    return results
+
+
 def main() -> int:
     args = parse_args()
     ensure_data_dirs(args.data_dir)
+    ensure_db_schema(args.data_dir)
     symbols = args.symbol if args.symbol else load_symbols(args.symbols)
-    summary = {"processed": 0, "missing_ohlcv": 0, "symbols": []}
-    for symbol in symbols:
-        status, row_count, output_path = calculate_for_symbol(args.data_dir, symbol)
-        if status == "done":
-            summary["processed"] += 1
-        else:
-            summary["missing_ohlcv"] += 1
-        summary["symbols"].append({"symbol": symbol, "status": status, "rows": row_count, "output": output_path})
+    mode = "selected" if args.symbol else "full" if args.full else "incremental"
 
+    con = connect_db(args.data_dir)
+    try:
+        with_ohlcv = {row[0] for row in con.execute("SELECT DISTINCT symbol FROM ohlcv").fetchall()}
+        candidates = [symbol for symbol in symbols if symbol in with_ohlcv]
+        targets = candidates if mode != "incremental" else find_stale_symbols(con, candidates)
+        results = calculate_batches(con, args.data_dir, targets, args.batch_size)
+    finally:
+        con.close()
+
+    summary = {
+        "mode": mode,
+        "processed": len(results),
+        "up_to_date": len(candidates) - len(targets),
+        "missing_ohlcv": len(symbols) - len(candidates),
+        "rows": sum(int(item["rows"]) for item in results),
+        "symbols": results,
+    }
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 

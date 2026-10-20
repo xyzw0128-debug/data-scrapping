@@ -36,6 +36,14 @@
 - [x] Webhook 기반 Discord 상태 메시지 생성/수정(실시간 진행률/전원 상태 표시) 추가
 - [x] Discord 진행률 카운트를 provider 중첩 상태(`symbols.<symbol>.twelve_data`) 기준으로 보정
 - [x] 다중 API 키 순차 소진 로테이션(KeyPool) 구현 (Twelve Data, Alpha Vantage)
+- [x] DuckDB 저장을 행 단위 upsert에서 배치 upsert(NDJSON 스테이징 + `INSERT OR REPLACE`)로 전환 (5,000행 기준 약 20초 → 0.1초 미만)
+- [x] `src.indicators`를 OHLCV가 바뀐 심볼만 다시 계산하는 증분 방식으로 변경(`--full`로 전체 재계산), 전체 약 1.5분
+- [x] 타입 변환 뷰(`ohlcv_typed`, `indicators_typed`, `macro_typed`, `news_typed`) 추가
+- [x] `src.fred`가 `config/fred_series.txt`의 전체 시리즈를 수집하도록 기본값 변경, DB에 있던 7개 시리즈를 목록에 추가
+- [x] `src.finnhub_news` 심볼 로테이션(최근 시도 오래된 순 → 유동성 순) + 심볼별 재개 상태(`data/state/finnhub_news.json`) + 분당 호출 제한
+- [x] `run_daily.sh`에서 단계 실패 시에도 다음 단계 계속 실행, 마지막에 실패 단계 보고 후 종료 코드 1
+- [x] 종료된 PID가 남긴 `collector.lock`을 다음 실행에서 자동 정리
+- [x] ML 데이터셋 내보내기(`src.export_dataset`): 시점 누수 방지 피처/라벨 Parquet + LLM 파인튜닝용 chat JSONL + metadata.json
 
 ## 다음 작업
 - [x] run_daily.sh에 DuckDB 검증 단계 포함
@@ -44,3 +52,5 @@
 ## 이후 예정 작업
 - [ ] 운영 중 축적 데이터 기준으로 검증 규칙(무결성/중복/이상치) 확장
 - [ ] SSD 마운트 경로를 config로 관리하는 방안 검토
+- [ ] 상장폐지 종목 데이터 확보 검토(현재 심볼 목록 기준이라 생존 편향 존재)
+- [ ] FRED 최초 발표값(ALFRED vintage) 기반 거시지표 시점 정렬 검토

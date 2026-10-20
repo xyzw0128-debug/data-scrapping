@@ -7,9 +7,11 @@ cd "$ROOT_DIR"
 PYTHON_BIN="${PYTHON_BIN:-python}"
 DRY_RUN="${DRY_RUN:-0}"
 TWELVE_MAX_SYMBOLS="${TWELVE_MAX_SYMBOLS:-700}"
-FRED_LIMIT="${FRED_LIMIT:-2}"
-FINNHUB_LIMIT="${FINNHUB_LIMIT:-2}"
-FINNHUB_DAYS_BACK="${FINNHUB_DAYS_BACK:-7}"
+# Empty FRED_LIMIT collects every series in config/fred_series.txt.
+FRED_LIMIT="${FRED_LIMIT:-}"
+# Finnhub rotates through symbols (least recently fetched first), so a few hundred per run covers the list over time.
+FINNHUB_LIMIT="${FINNHUB_LIMIT:-300}"
+FINNHUB_DAYS_BACK="${FINNHUB_DAYS_BACK:-30}"
 ALPHA_VANTAGE_MAX_SYMBOLS="${ALPHA_VANTAGE_MAX_SYMBOLS:-2}"
 RUN_FETCH_TICKERS="${RUN_FETCH_TICKERS:-0}"
 RUN_TWELVE="${RUN_TWELVE:-1}"
@@ -30,6 +32,20 @@ fi
 
 log_step() {
   printf '\n[%s] %s\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$*"
+}
+
+# Stages are independent: a failure (for example one news symbol erroring) is recorded
+# and the remaining stages still run. The script exits non-zero at the end if any failed.
+failed_stages=()
+run_stage() {
+  local name="$1"
+  shift
+  local status=0
+  "$@" || status=$?
+  if [[ "$status" -ne 0 ]]; then
+    printf '[%s] stage "%s" failed with exit code %s; continuing\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$name" "$status" >&2
+    failed_stages+=("$name")
+  fi
 }
 
 update_discord_status() {
@@ -66,36 +82,40 @@ update_discord_status --status "대기중" --set-start --current-symbol "없음"
 
 if [[ "$RUN_FETCH_TICKERS" == "1" ]]; then
   log_step "Fetching Twelve Data ticker list"
-  "$PYTHON_BIN" -m src.fetch_tickers "${maybe_dry_run_args[@]}"
+  run_stage fetch_tickers "$PYTHON_BIN" -m src.fetch_tickers "${maybe_dry_run_args[@]}"
 fi
 
 if [[ "$RUN_TWELVE" == "1" ]]; then
   log_step "Collecting Twelve Data OHLCV"
   update_discord_status --status "수집 중" --current-symbol "twelve_data"
   start_status_monitor
-  "$PYTHON_BIN" -m src.main --provider twelve_data --max-symbols "$TWELVE_MAX_SYMBOLS" "${maybe_dry_run_args[@]}"
+  run_stage twelve_data "$PYTHON_BIN" -m src.main --provider twelve_data --max-symbols "$TWELVE_MAX_SYMBOLS" "${maybe_dry_run_args[@]}"
   stop_status_monitor
   update_discord_status --status "수집 후처리 중" --current-symbol "없음" --refresh-progress
 fi
 
 if [[ "$RUN_ALPHA_VANTAGE" == "1" ]]; then
   log_step "Collecting Alpha Vantage OHLCV backup"
-  "$PYTHON_BIN" -m src.alpha_vantage --max-symbols "$ALPHA_VANTAGE_MAX_SYMBOLS" "${maybe_dry_run_args[@]}"
+  run_stage alpha_vantage "$PYTHON_BIN" -m src.alpha_vantage --max-symbols "$ALPHA_VANTAGE_MAX_SYMBOLS" "${maybe_dry_run_args[@]}"
 fi
 
 if [[ "$RUN_INDICATORS" == "1" ]]; then
-  log_step "Calculating local indicators"
-  "$PYTHON_BIN" -m src.indicators
+  log_step "Calculating local indicators (symbols whose OHLCV changed)"
+  run_stage indicators "$PYTHON_BIN" -m src.indicators
 fi
 
 if [[ "$RUN_FRED" == "1" ]]; then
   log_step "Collecting FRED macro series"
-  "$PYTHON_BIN" -m src.fred --limit "$FRED_LIMIT" "${maybe_dry_run_args[@]}"
+  fred_args=()
+  if [[ -n "$FRED_LIMIT" ]]; then
+    fred_args=(--limit "$FRED_LIMIT")
+  fi
+  run_stage fred "$PYTHON_BIN" -m src.fred "${fred_args[@]}" "${maybe_dry_run_args[@]}"
 fi
 
 if [[ "$RUN_FINNHUB" == "1" ]]; then
   log_step "Collecting Finnhub company news"
-  "$PYTHON_BIN" -m src.finnhub_news --limit "$FINNHUB_LIMIT" --days-back "$FINNHUB_DAYS_BACK" "${maybe_dry_run_args[@]}"
+  run_stage finnhub_news "$PYTHON_BIN" -m src.finnhub_news --limit "$FINNHUB_LIMIT" --days-back "$FINNHUB_DAYS_BACK" "${maybe_dry_run_args[@]}"
 fi
 
 if [[ "$RUN_SUMMARY" == "1" ]]; then
@@ -105,7 +125,7 @@ if [[ "$RUN_SUMMARY" == "1" ]]; then
   if [[ "$SEND_DISCORD" == "1" ]]; then
     summary_args=(--send-discord)
   fi
-  "$PYTHON_BIN" -m src.summary "${summary_args[@]}"
+  run_stage summary "$PYTHON_BIN" -m src.summary "${summary_args[@]}"
 fi
 
 if [[ "$RUN_DUCKDB_VALIDATE" == "1" ]]; then
@@ -114,7 +134,7 @@ if [[ "$RUN_DUCKDB_VALIDATE" == "1" ]]; then
   else
     log_step "Running DuckDB validation"
     update_discord_status --status "검증 중" --current-symbol "validate_duckdb"
-    "$PYTHON_BIN" -m src.validate_duckdb
+    run_stage validate_duckdb "$PYTHON_BIN" -m src.validate_duckdb
   fi
 fi
 
@@ -128,6 +148,12 @@ if [[ "$RUN_BACKUP" == "1" ]]; then
   update_discord_status --status "완료" --backup-finish --current-symbol "없음" --refresh-progress
 else
   update_discord_status --status "완료" --current-symbol "없음" --refresh-progress
+fi
+
+if (( ${#failed_stages[@]} > 0 )); then
+  update_discord_status --error "실패 단계: ${failed_stages[*]}"
+  log_step "Daily run complete with failed stages: ${failed_stages[*]}"
+  exit 1
 fi
 
 log_step "Daily run complete"

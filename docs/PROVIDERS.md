@@ -20,18 +20,20 @@
 ## FRED
 - **역할**: 거시 지표 시리즈 수집 (`src.fred`).
 - **알려진 한도**: 코드/기본 설정 파일에 수치형 제한은 별도 정의되어 있지 않음.
-- **실제 사용 목표**: `config/fred_series.txt`의 소규모 시리즈를 주기적으로 적재.
+- **실제 사용 목표**: `config/fred_series.txt`의 소규모 시리즈(현재 11개)를 주기적으로 적재.
 - **주의사항**:
-  - `--limit`로 런당 처리량을 제한할 수 있습니다.
+  - 기본은 목록 전체 수집이며, `--limit`로 런당 처리량을 제한할 수 있습니다.
   - 원본 응답은 `data/raw/fred/`에 저장됩니다.
 
 ## Finnhub
 - **역할**: 심볼별 company news 수집 (`src.finnhub_news`).
-- **알려진 한도**: 코드/기본 설정 파일에 수치형 제한은 별도 정의되어 있지 않음.
-- **실제 사용 목표**: 지정 기간(`--days-back` 또는 from/to)의 뉴스 배치 수집.
+- **알려진 한도**: 무료 플랜 분당 60회. 이 저장소는 `--per-minute-limit` 기본 30으로 절반만 사용.
+- **실제 사용 목표**: 런마다 `--limit`(run_daily 기본 300)개 심볼을 로테이션하며 뉴스 누적 수집.
 - **주의사항**:
-  - 심볼별 CSV(`FINNHUB_<SYMBOL>.csv`)에 ID/URL 기준 업서트됩니다.
-  - `--limit`로 런당 심볼 수를 제한할 수 있습니다.
+  - DuckDB `news` 테이블에 `(symbol, id)` 기준으로 업서트됩니다.
+  - 심볼 선택 순서: 최근 시도가 가장 오래된 심볼(미수집 우선) → 최근 60거래일 평균 거래대금 큰 순.
+  - 심볼별 상태는 `data/state/finnhub_news.json`에 저장되며, 다음 수집은 마지막 성공 `to` 날짜 전날부터 이어집니다(최대 `--max-days-back`일).
+  - HTTP 429 응답 시 60초 대기 후 1회 재시도합니다.
 
 ## providers.yaml 기본값과 이유
 - `twelve_data`와 `alpha_vantage`만 `config/providers.yaml`에 정의되어 있습니다.

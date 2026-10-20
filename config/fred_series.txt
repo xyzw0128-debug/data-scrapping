@@ -3,3 +3,11 @@ FEDFUNDS
 DGS10
 UNRATE
 CPIAUCSL
+# Series already present in market.db; listed here so daily runs keep them current.
+T10Y2Y
+T10Y3M
+T10YIE
+REAINTRATREARAT10Y
+BOGMBASE
+DTWEXBGS
+DEXKOUS
