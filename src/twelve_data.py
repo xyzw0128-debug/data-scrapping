@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import time
@@ -75,13 +76,20 @@ def _error_message(payload: Any) -> str | None:
 
 
 def default_http_get(url: str) -> tuple[int, Any]:
-    """GET a URL and return (HTTP status, parsed JSON); HTTP errors return their JSON body."""
+    """GET a URL and return (HTTP status, parsed JSON); HTTP errors return their JSON body.
+
+    An error body that cannot be read (connection dropped after the status line) falls back
+    to the HTTP reason, so the status code still decides how the error is handled.
+    """
     request = Request(url, headers={"User-Agent": "data-scrapping/0.2"})
     try:
         with urlopen(request, timeout=60) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")
+        try:
+            body = exc.read().decode("utf-8", "replace")
+        except (http.client.HTTPException, OSError):
+            body = ""
         try:
             payload: Any = json.loads(body)
         except ValueError:
@@ -124,7 +132,9 @@ class TwelveDataClient:
             self.rate_limiter.wait()
             try:
                 status, payload = self.http_get(url)
-            except (URLError, TimeoutError, ValueError, OSError) as exc:
+            # HTTPException (IncompleteRead, BadStatusLine, ...) is not an OSError: a response
+            # lost mid-transfer has an unknown billing outcome like any network error.
+            except (URLError, TimeoutError, ValueError, OSError, http.client.HTTPException) as exc:
                 last_error = exc
                 uncertain += 1
             else:

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import importlib.util
+import io
 import json
 import logging
 import os
@@ -11,12 +13,13 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
 
 from src import main
 from src.config import ProviderConfig
 from src.rate_limit import KeyPool, PerMinuteRateLimiter, RunCreditCap
-from src.twelve_data import BudgetExhaustedError, SymbolNotFoundError, TwelveDataClient, TwelveDataError
+from src.twelve_data import BudgetExhaustedError, SymbolNotFoundError, TwelveDataClient, TwelveDataError, default_http_get
 
 
 def _config() -> ProviderConfig:
@@ -99,6 +102,45 @@ class TwelveDataClientTest(unittest.TestCase):
         with self.assertRaises(TwelveDataError):
             client.time_series("AAPL", "splits")
         self.assertEqual((_used(state, 0), client.cap.used), (2, 2))
+
+    def test_http_exceptions_are_uncertain_attempts(self) -> None:
+        # IncompleteRead/BadStatusLine are http.client.HTTPException, not OSError.
+        responses = iter([http.client.IncompleteRead(b"{\"val"), (200, {"status": "ok", "values": []})])
+
+        def flaky(url):
+            item = next(responses)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        client, state, sleeps = _client(flaky, cap=10)
+        self.assertEqual(client.time_series("AAPL", "splits"), {"status": "ok", "values": []})
+        self.assertEqual((_used(state, 0), client.cap.used), (2, 2), "lost response + success")
+        self.assertEqual(sleeps, [2.0])
+
+        def always_bad(url):
+            raise http.client.BadStatusLine("")
+
+        client, state, _ = _client(always_bad, cap=10)
+        with self.assertRaises(TwelveDataError) as ctx:
+            client.time_series("AAPL", "splits")
+        self.assertEqual(ctx.exception.uncertain_attempts, 2)
+        self.assertEqual((_used(state, 0), client.cap.used), (2, 2))
+
+    def test_http_error_with_unreadable_body_keeps_status(self) -> None:
+        class LostBody(io.BytesIO):
+            def read(self, *args):
+                raise http.client.IncompleteRead(b"")
+
+        def fake_urlopen(status, body):
+            def urlopen(request, timeout):
+                raise HTTPError(request.full_url, status, "Bad Gateway" if status == 502 else "Not Found", {}, body)
+            return urlopen
+
+        with patch("src.twelve_data.urlopen", fake_urlopen(502, LostBody())):
+            self.assertEqual(default_http_get("https://example.invalid/x"), (502, {"status": "error", "message": "Bad Gateway"}))
+        with patch("src.twelve_data.urlopen", fake_urlopen(404, io.BytesIO(b'{"status": "error", "message": "not found"}'))):
+            self.assertEqual(default_http_get("https://example.invalid/x"), (404, {"status": "error", "message": "not found"}))
 
     def test_usage_sync_failure_excludes_key(self) -> None:
         def http_get(url):
@@ -194,6 +236,26 @@ class CoreCollectionTest(unittest.TestCase):
             finally:
                 con.close()
         self.assertEqual(rows, [("2024-06-10", "9")])
+
+    def test_lost_response_fails_one_symbol_and_core_continues(self) -> None:
+        def http_get(url):
+            query = parse_qs(urlparse(url).query)
+            if query["symbol"][0] == "AAA":
+                raise http.client.IncompleteRead(b"")
+            return 200, {"status": "ok", "values": _bars({"2024-06-11": 10.0})}
+
+        client, state, _ = _client(http_get, cap=20)
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            args = argparse.Namespace(dry_run=False, force=False, data_dir=data_dir, state=data_dir / "state" / "state.json")
+            summary = {"started_at": "2024-06-12T00:00:00Z", "run_id": "test", "processed": 0, "failed": 0, "skipped_rate_limit": 0, "symbols": []}
+            run = main.Run(args, state, summary, logging.getLogger("test"), client.cap)
+            main.run_core(run, client, ["AAA", "BBB"], "2024-06-11")
+        self.assertEqual({k: summary["core"][k] for k in ("done", "failed")}, {"done": 1, "failed": 1})
+        self.assertEqual(state["symbols"]["AAA"]["twelve_data"]["status"], "failed")
+        self.assertEqual(state["symbols"]["BBB"]["twelve_data"]["core_session"], "2024-06-11")
+        # AAA: 2 uncertain attempts; BBB: adjust=splits + adjust=all + adjust=none (split history).
+        self.assertEqual(client.cap.used, 5)
 
 
 class DryRunTest(unittest.TestCase):

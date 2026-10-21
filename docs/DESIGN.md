@@ -63,7 +63,7 @@
 - 키별 하루 예산 = `daily_limit - daily_reserve` = 700, UTC 날짜 기준. 서버 한도도 00:00 UTC에 초기화됩니다.
 - 키는 key0 → key1 → key2 순서로 다 쓰고 넘어갑니다. 실행당 상한(`TWELVE_MAX_CREDITS`, 초기 1400)이 있어 보통 key2는 앞 키가 외부 사용 등으로 일찍 소진됐을 때만 쓰입니다.
 - 실행 시작 때 `/api_usage`의 서버 `daily_usage`를 읽어 `state.json` 값과 큰 쪽을 씁니다. 두 번 시도해도 읽지 못한 키는 그 실행에서 제외합니다(모르는 외부 사용량이 reserve를 깎지 않게). 로컬 예산이 없는 키는 조회하지 않습니다.
-- 결과가 불확실한 시도(네트워크 오류, 응답 유실, HTTP 5xx)도 시도마다 크레딧을 차감합니다.
+- 결과가 불확실한 시도(네트워크 오류, 응답 유실·도중 끊김(`http.client.IncompleteRead`·`BadStatusLine` 등), HTTP 5xx)도 시도마다 크레딧을 차감합니다.
 - 호출할 때마다 UTC 날짜를 확인합니다. 실행 중 자정을 넘으면 새 날 예산으로 셉니다.
 - `state.json`의 `calls_used_today` 필드 이름은 유지하고 값은 크레딧으로 해석합니다(기존 값과 호환).
 - 분당 7회 제한(`per_minute_limit`)은 모든 HTTP 호출에 적용합니다.
@@ -167,7 +167,7 @@
 - Python: `run_daily.sh` 기본값은 `.venv/bin/python`(없으면 `python3`).
 - 설정: `run_daily.sh`도 `.env`를 읽습니다. 셸에서 준 값이 우선입니다. `/etc/data-scrapping.env`는 쓰지 않습니다.
 - 설치: `scripts/install_local.sh`(venv 확인·생성, 패키지 설치, 사용자 유닛 설치·활성화). 백업 타이머는 설치만 하고 켜지 않습니다.
-- 상태 표시: `summary.py`는 CPU 온도를 hwmon `k10temp`에서 읽습니다. `progress.py`는 종목 수를 파일에서 읽고 UTC 날짜를 씁니다.
+- 상태 표시: `summary.py`는 CPU 온도를 hwmon `k10temp`에서 읽습니다. `progress.py`는 종목 수를 파일에서 읽고 UTC 날짜를 씁니다. 잠금은 잡혀 있는데 `current_run`이 없으면(Twelve Data 외 단계) "실행 중"과 현재 단계(잠금 보유 프로세스와 그 자식의 명령줄), 뉴스 진행률(`finnhub_news.json`에서 잠금을 잡은 뒤 시도한 종목 수)을 보여 줍니다.
 
 ## 9. 작업 순서
 

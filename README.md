@@ -77,7 +77,7 @@ DRY_RUN=1 scripts/run_daily.sh   # plan only: no collection API calls, no state/
 scripts/run_daily.sh             # real run (the timer does this at 16:10 New York time)
 ```
 
-Stages: universe refresh (weekly) → Twelve Data core → FRED → core snapshot → Twelve Data rotation → indicators → Finnhub news → summary → DuckDB validation → full snapshot → optional backup. A failing stage is reported and the remaining stages still run; the script exits non-zero at the end if any stage failed.
+Stages: universe refresh (weekly) → Twelve Data core → FRED → core snapshot → Twelve Data rotation → indicators → Finnhub news → summary → DuckDB validation → full snapshot → optional backup. A failing stage is reported and the remaining stages still run; the script exits non-zero at the end if any stage failed. A failed Discord status update (`SEND_DISCORD=1`) is logged and never stops the run.
 
 ## Individual collectors
 
@@ -121,7 +121,7 @@ Output in `data/datasets/<name>/`: Parquet features/labels, chat-format JSONL, a
 ## Monitoring
 
 ```bash
-.venv/bin/python scripts/progress.py          # live progress (phase, core completion, key budgets)
+.venv/bin/python scripts/progress.py          # live progress (running stage, core completion, news progress, key budgets)
 .venv/bin/python -m src.summary               # data/logs/daily/<date>.json
 .venv/bin/python -m src.validate_duckdb       # data/logs/validation/duckdb_latest.json
 journalctl --user -u data-scrapping -n 200 --no-pager
