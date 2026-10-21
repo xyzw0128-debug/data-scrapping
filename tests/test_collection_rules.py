@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import tempfile
 import unittest
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -18,7 +21,7 @@ from src.lock import PIPELINE_LOCK_ENV, LockHeldError, pipeline_lock, pipeline_r
 from src.market_calendar import expected_session, is_trading_day, nyse_holidays
 from src.scheduling import choose_rotation_symbols, record_failure, record_success
 from src.snapshot import create_snapshot, evaluate_completion
-from src.universe import Universe, load_universe, parse_sp500_history, recent_removals, refresh_universe
+from src.universe import Universe, load_universe, parse_sp500_history, recent_removals, refresh_reason, refresh_universe, universe_path
 
 HAS_DUCKDB = importlib.util.find_spec("duckdb") is not None
 NY = ZoneInfo("America/New_York")
@@ -156,6 +159,76 @@ class UniverseDryRunTest(unittest.TestCase):
             self.assertFalse((root / "data" / "state" / "universe.json").exists())
         result = json.loads(out.getvalue())
         self.assertEqual((result["status"], result["refresh_due"], result["sp500_count"]), ("dry_run", True, 0))
+
+
+def _run_universe_main(root: Path, *flags: str) -> tuple[int, dict, list[str]]:
+    """Run ``python -m src.universe`` offline; returns (exit code, JSON output, network calls made)."""
+    from src import universe as universe_module
+
+    calls: list[str] = []
+
+    def fake_catalog(endpoint: str, params: dict) -> dict:
+        calls.append(endpoint)
+        return _catalog(endpoint, params)
+
+    def fake_download(url: str) -> str:
+        calls.append("sp500_csv")
+        return SP500_CSV
+
+    real_refresh = universe_module.refresh_universe
+    argv = ["universe", "--data-dir", str(root / "data"), "--config-dir", str(root / "config"), "--state", str(root / "state.json"), *flags]
+    out = io.StringIO()
+    with patch("sys.argv", argv), \
+            patch.object(universe_module, "refresh_universe", lambda *a, **kw: real_refresh(*a, download=fake_download, **kw)), \
+            patch("src.twelve_data.TwelveDataClient", lambda *a: SimpleNamespace(request=fake_catalog)), \
+            contextlib.redirect_stdout(out):
+        code = universe_module.main()
+    return code, json.loads(out.getvalue()), calls
+
+
+class UniverseRefreshReasonTest(unittest.TestCase):
+    def test_reason_values(self) -> None:
+        now = datetime(2026, 10, 21, 3, 0, tzinfo=UTC)
+
+        def reason(nasdaq, refreshed_at="2026-10-20T12:17:32Z", **kwargs):
+            universe = Universe(etfs=["SPY"], sp500=["AAA"], extra=[], nasdaq=nasdaq, refreshed_at=refreshed_at)
+            return refresh_reason(universe, 7, now=now, **kwargs)
+
+        self.assertIsNone(reason(["NEWW"]))
+        self.assertEqual(reason([]), "nasdaq_list_missing")
+        self.assertIsNone(reason([], need_nasdaq=False), "--skip-catalog does not rewrite the list")
+        self.assertEqual(reason([], refreshed_at=None), "never_refreshed")
+        self.assertEqual(reason(["NEWW"], refreshed_at="2026-10-14T03:00:00Z"), "max_age")
+
+    def test_missing_nasdaq_list_is_refreshed_despite_recent_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, data = root / "config", root / "data"
+            config.mkdir()
+            (config / "core_etfs.txt").write_text("SPY\n", encoding="utf-8")
+            refresh_universe(data, config, _catalog, download=lambda url: SP500_CSV)
+            (config / "symbols.txt").unlink()  # a branch switch deleted the gitignored list
+            saved = universe_path(data).read_text(encoding="utf-8")
+
+            code, result, calls = _run_universe_main(root, "--dry-run")
+            self.assertEqual((code, result["refresh_due"], result["reason"], result["nasdaq_count"]), (0, True, "nasdaq_list_missing", 0))
+            self.assertEqual(calls, [], "dry-run must not touch the network")
+            self.assertFalse((config / "symbols.txt").exists())
+            self.assertEqual(universe_path(data).read_text(encoding="utf-8"), saved)
+
+            (config / "symbols.txt").write_text("", encoding="utf-8")
+            _, result, _ = _run_universe_main(root, "--dry-run")
+            self.assertEqual((result["refresh_due"], result["reason"]), (True, "nasdaq_list_missing"), "an empty list counts as missing")
+            _, result, calls = _run_universe_main(root, "--skip-catalog")
+            self.assertEqual((result["status"], calls), ("fresh", []), "an S&P-only refresh cannot restore the list")
+
+            code, result, calls = _run_universe_main(root)
+            self.assertEqual((code, result["status"], result["reason"]), (0, "refreshed", "nasdaq_list_missing"))
+            self.assertEqual(calls, ["sp500_csv", "stocks", "stocks", "etfs"])
+            self.assertEqual((config / "symbols.txt").read_text(encoding="utf-8"), "AAA\nNEWW\n")
+
+            _, result, calls = _run_universe_main(root)
+            self.assertEqual((result["status"], calls), ("fresh", []))
 
 
 class CompletionTest(unittest.TestCase):
