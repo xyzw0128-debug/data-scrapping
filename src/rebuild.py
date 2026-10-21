@@ -14,11 +14,12 @@ one procedure, run under the pipeline lock:
    and row-hash checksums of every table and view (``prices_daily`` included).
 4. Hard-link the current file as market.db.bak-<UTC date> and ``os.replace`` the new file over
    market.db. Any failure before the replace removes only the temporary file; market.db is
-   never moved aside.
+   never moved aside. Only after a successful replace are older backups removed, keeping the
+   newest ``--keep-backups`` (2).
 
 The size right after a rebuild is the baseline in data/state/db_maintenance.json.
 ``--if-needed`` (run_daily.sh, just before the full snapshot) rebuilds only when market.db has
-grown past ``--growth-factor`` (2) times that baseline. Backups are kept until removed by hand.
+grown past ``--growth-factor`` (2) times that baseline.
 """
 
 from __future__ import annotations
@@ -47,6 +48,8 @@ CONVERT_MEMORY_LIMIT = "3GB"
 REBUILD_MEMORY_LIMIT = "2GB"
 DEFAULT_THREADS = 4
 HISTORY_KEEP = 20
+# Backups (market.db.bak-*) left after a successful rebuild, newest first; the one just made counts.
+KEEP_BACKUPS = 2
 # The new file is never larger than the source; keep that much free plus a margin.
 FREE_SPACE_FACTOR = 1.1
 # Tables whose version 3 VARCHAR columns become DATE/DOUBLE/BIGINT in version 4.
@@ -88,6 +91,15 @@ def backup_path(db_path: Path, now: datetime) -> Path:
     return path
 
 
+def prune_backups(db_path: Path, keep: int) -> list[str]:
+    """Delete all but the newest ``keep`` market.db.bak-* files; names sort by rebuild time."""
+    backups = sorted(path for path in db_path.parent.glob(f"{db_path.name}.bak-*") if path.is_file())
+    removed = backups[: max(0, len(backups) - keep)]
+    for path in removed:
+        path.unlink()
+    return [str(path) for path in removed]
+
+
 def _utc_iso(now: datetime) -> str:
     return now.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -126,7 +138,7 @@ def initialize_baseline(data_dir: Path, size: int, now: datetime) -> None:
 
 
 def record_rebuild(data_dir: Path, result: dict[str, Any]) -> None:
-    keys = ["mode", "finished_at", "size_before_bytes", "size_after_bytes", "backup_path", "schema_version", "duration_sec"]
+    keys = ["mode", "finished_at", "size_before_bytes", "size_after_bytes", "backup_path", "pruned_backups", "schema_version", "duration_sec"]
     entry = {key: result.get(key) for key in keys}
     state = load_maintenance(data_dir)
     state.update({"baseline_bytes": result["size_after_bytes"], "last_rebuild": entry})
@@ -324,8 +336,11 @@ def rebuild_database(
     memory_limit: str | None = None,
     threads: int = DEFAULT_THREADS,
     now: datetime | None = None,
+    keep_backups: int = KEEP_BACKUPS,
 ) -> dict[str, Any]:
     """Rebuild market.db (caller holds the pipeline lock). Returns a result dict; raises RebuildError."""
+    if keep_backups < 1:
+        raise RebuildError("keep_backups must be at least 1 (the backup of this rebuild)")
     started = time.monotonic()
     now = now or datetime.now(UTC)
     memory_limit = memory_limit or (CONVERT_MEMORY_LIMIT if to_v4 else REBUILD_MEMORY_LIMIT)
@@ -413,6 +428,10 @@ def rebuild_database(
         "duration_sec": round(time.monotonic() - started, 1),
     })
     try:
+        result["pruned_backups"] = prune_backups(db_path, keep_backups)
+    except OSError as exc:  # market.db is already replaced; leftover backups are only disk space
+        result["prune_error"] = f"{type(exc).__name__}: {exc}"
+    try:
         record_rebuild(data_dir, result)
     except OSError as exc:  # market.db is already replaced; the next check keeps the old baseline
         result["state_error"] = f"{type(exc).__name__}: {exc}"
@@ -432,7 +451,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             return {"status": "baseline_initialized", **check, "baseline_bytes": check["size_bytes"]}
         if not check["due"]:
             return {"status": "skipped", "reason": "below_threshold", **check}
-        return {**rebuild_database(args.data_dir, memory_limit=args.memory_limit, threads=args.threads), "check": check}
+        return {**rebuild_database(args.data_dir, memory_limit=args.memory_limit, threads=args.threads, keep_backups=args.keep_backups), "check": check}
     if args.dry_run:
         plan: dict[str, Any] = {"status": "dry_run", "mode": "to_v4" if args.to_v4 else "rebuild", "db_path": str(db_path)}
         if db_path.exists():
@@ -444,7 +463,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 con.close()
             plan.update({"size_bytes": db_path.stat().st_size, "free_bytes": shutil.disk_usage(db_path.parent).free})
         return plan
-    return rebuild_database(args.data_dir, to_v4=args.to_v4, memory_limit=args.memory_limit, threads=args.threads)
+    return rebuild_database(args.data_dir, to_v4=args.to_v4, memory_limit=args.memory_limit, threads=args.threads, keep_backups=args.keep_backups)
 
 
 def parse_args() -> argparse.Namespace:
@@ -456,6 +475,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--growth-factor", type=float, default=DEFAULT_GROWTH_FACTOR)
     parser.add_argument("--memory-limit", default=None, help=f"DuckDB memory_limit (default: {CONVERT_MEMORY_LIMIT} with --to-v4, else {REBUILD_MEMORY_LIMIT})")
     parser.add_argument("--threads", type=int, default=DEFAULT_THREADS)
+    parser.add_argument("--keep-backups", type=int, default=KEEP_BACKUPS, help="market.db.bak-* files kept after a successful rebuild, this one included")
     parser.add_argument("--dry-run", action="store_true", help="Report the decision or plan without writing anything")
     return parser.parse_args()
 

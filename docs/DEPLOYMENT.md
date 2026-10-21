@@ -75,12 +75,12 @@ systemctl --user disable --now data-scrapping.timer # 자동 실행 끄기
 6. 스냅숏 갱신: `.venv/bin/python -m src.snapshot --phase full`.
 7. `git push origin main`.
 
-변환 전 파일은 `data/db/market.db.bak-<UTC 날짜>`(하드링크)로 남습니다. 일주일쯤 운영을 확인한 뒤 지웁니다. 변환이 실패하면 임시 파일만 지워지고 `market.db`는 버전 3 그대로입니다. 그때는 다음 수집 전에 운영 폴더 `main`을 반영 전 커밋으로 되돌립니다(아직 push 전이고 작업 트리가 깨끗하면 `git reset --hard ORIG_HEAD`).
+변환 전 파일은 `data/db/market.db.bak-<UTC 날짜>`(하드링크)로 남습니다. 일주일쯤 운영을 확인한 뒤 지웁니다(그 전에 정기 재구성이 두 번 돌면 최신 2개 규칙으로 먼저 지워집니다). 변환이 실패하면 임시 파일만 지워지고 `market.db`는 버전 3 그대로입니다. 그때는 다음 수집 전에 운영 폴더 `main`을 반영 전 커밋으로 되돌립니다(아직 push 전이고 작업 트리가 깨끗하면 `git reset --hard ORIG_HEAD`).
 
 ## 데이터 경로
 
 - 모든 CLI는 `--data-dir`로 데이터 경로를 바꿀 수 있습니다. `run_daily.sh`는 저장소의 `data/`를 씁니다.
-- 디스크 사용량: `market.db` 약 1.1GB(스키마 버전 4. 버전 3은 약 2.3GB), 스냅숏 같은 크기, 원본 응답(gzip, 종목별 최신 1개) 약 0.6GB. 재구성 백업(`market.db.bak-*`)은 자동으로 지우지 않습니다.
+- 디스크 사용량: `market.db` 약 1.1GB(스키마 버전 4. 버전 3은 약 2.3GB), 스냅숏 같은 크기, 원본 응답(gzip, 종목별 최신 1개) 약 0.6GB. 재구성 백업(`market.db.bak-*`)은 재구성이 성공할 때 최신 2개만 남기고 지웁니다(하나에 약 2GB).
 
 ## 트러블슈팅
 

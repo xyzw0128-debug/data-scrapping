@@ -255,6 +255,27 @@ class PeriodicRebuildTest(unittest.TestCase):
             with self.assertRaisesRegex(rebuild.RebuildError, "convert first"):
                 rebuild.rebuild_database(data_dir, memory_limit="256MB", threads=1, now=NOW)
 
+    def test_only_the_newest_two_backups_are_kept_after_a_successful_rebuild(self) -> None:
+        from src import rebuild
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            db_path = self._v4_db(data_dir)
+            snapshot = db_path.with_name("market_snapshot.db")
+            snapshot.write_bytes(b"not a backup")
+            days = [datetime(2026, 10, day, 22, 0, tzinfo=UTC) for day in (21, 22, 23)]
+            results = [rebuild.rebuild_database(data_dir, memory_limit="256MB", threads=1, now=day) for day in days]
+            self.assertEqual([r["pruned_backups"] for r in results[:2]], [[], []])
+            self.assertEqual(results[2]["pruned_backups"], [str(db_path.with_name("market.db.bak-2026-10-21"))])
+
+            with patch.object(rebuild, "verify_rebuild", side_effect=rebuild.RebuildError("checksum differs")):
+                with self.assertRaises(rebuild.RebuildError):
+                    rebuild.rebuild_database(data_dir, memory_limit="256MB", threads=1, now=datetime(2026, 10, 24, 22, 0, tzinfo=UTC))
+            names = sorted(p.name for p in db_path.parent.iterdir())
+            history = rebuild.load_maintenance(data_dir)["history"]
+        self.assertEqual(names, ["market.db", "market.db.bak-2026-10-22", "market.db.bak-2026-10-23", "market_snapshot.db"], "a failed rebuild deletes nothing")
+        self.assertEqual(history[-1]["pruned_backups"], [results[2]["pruned_backups"][0]])
+
     def test_lock_held_exits_with_code_2(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

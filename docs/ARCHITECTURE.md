@@ -8,7 +8,7 @@
 config/
   core_etfs.txt  fred_series.txt  providers.yaml  symbols.txt  symbols.txt.example
 data/
-  db/        market.db, market_snapshot.db, market.db.bak-<UTC 날짜>(재구성 전 원본, 손으로 지움)
+  db/        market.db, market_snapshot.db, market.db.bak-<UTC 날짜>(재구성 전 원본, 최신 2개만 남김)
   logs/      collector.log, runs/, daily/, validation/
   raw/       twelve_data/{splits,all,none}/<symbol>.json.gz, fred/, finnhub_news/
   state/     state.json, universe.json, sp500_hist.csv, fred.json, finnhub_news.json, db_maintenance.json, pipeline.lock
