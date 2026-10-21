@@ -1,10 +1,5 @@
 # STAGES
 
-- [x] Project root `.env` auto-load added to API/webhook CLI entry points
-- [x] Deferred previously failed symbols behind new/skipped symbols in collection queue
-- [x] Count failed Twelve Data attempts against the active key budget
-- [x] Split `src.main` symbol handling/progress updates into helper functions
-
 ## 완료된 단계
 - [x] Stage 1 MVP 기본 OHLCV 수집기(Twelve Data) 구현
 - [x] 상태 파일(`state.json`) 기반 재개 및 일일 provider 상태 관리
@@ -36,6 +31,10 @@
 - [x] Webhook 기반 Discord 상태 메시지 생성/수정(실시간 진행률/전원 상태 표시) 추가
 - [x] Discord 진행률 카운트를 provider 중첩 상태(`symbols.<symbol>.twelve_data`) 기준으로 보정
 - [x] 다중 API 키 순차 소진 로테이션(KeyPool) 구현 (Twelve Data, Alpha Vantage)
+- [x] API/webhook CLI 진입점에서 프로젝트 루트 `.env` 자동 로드
+- [x] 수집 대기열에서 이전 실패 종목을 신규/건너뛴 종목 뒤로 미룸
+- [x] Twelve Data 실패 시도도 사용 중인 키 예산에 차감
+- [x] `src.main`의 종목 처리·진행 상황 갱신을 헬퍼 함수로 분리
 - [x] DuckDB 저장을 행 단위 upsert에서 배치 upsert(NDJSON 스테이징 + `INSERT OR REPLACE`)로 전환 (5,000행 기준 약 20초 → 0.1초 미만)
 - [x] `src.indicators`를 OHLCV가 바뀐 심볼만 다시 계산하는 증분 방식으로 변경(`--full`로 전체 재계산), 전체 약 1.5분
 - [x] 타입 변환 뷰(`ohlcv_typed`, `indicators_typed`, `macro_typed`, `news_typed`) 추가
@@ -75,6 +74,10 @@
 - [x] `scripts/run_daily.sh`: `SEND_DISCORD=1`일 때 Discord 상태 갱신 실패가 `set -e`로 실행 전체를 멈추지 않도록 경고만 남김
 - [x] `src.universe`: NASDAQ 목록(`config/symbols.txt`)이 없거나 비어 있으면 마지막 갱신이 7일 안이어도 갱신(운영 폴더 브랜치 전환으로 파일이 지워져 순환 28종목·뉴스 약 555종목으로 줄던 문제). 갱신 이유를 결과 JSON `reason`(`forced`/`never_refreshed`/`nasdaq_list_missing`/`max_age`)에 기록, `--dry-run`은 `nasdaq_count`도 보고. `--skip-catalog`는 목록을 다시 쓰지 않으므로 이 조건을 보지 않음. 카탈로그 호출은 0크레딧
 - [x] `src.twelve_data`: 핵심 단계가 실행당 상한을 다 쓴 뒤의 순환 단계에서 `sync_usage()`가 키를 `usage_sync_failed: run_credit_cap`으로 제외하고 경고를 남기던 문제 수정. 상한이 `/api_usage` 1크레딧을 못 내면 조회 없이 `usage_sync`에 `skipped: run_credit_cap`만 남기고 키를 제외하지 않음(상한이 그 실행의 유료 호출을 모두 막으므로 reserve 영향 없음). 키 예산 부족 건너뛰기와 두 번 실패한 키 제외는 그대로이고, 실제 실패 뒤 재시도가 예산에 막혀 제외될 때는 사유를 `run_credit_cap`이 아닌 실제 실패로 기록
+
+## 2026-10-21 에이전트 작업 규칙 갱신
+- [x] `AGENTS.md`를 개편 이후 상태로 갱신: 필수 읽기에 `docs/DESIGN.md`(설치·운영 작업은 `docs/DEPLOYMENT.md`) 추가, 크레딧 예산(실행당 상한 포함)·`data/state/` 상태 파일·파이프라인 잠금·dry-run·stockpred 스냅숏 계약 규칙, 운영 PC 주의사항(운영 폴더는 `main` 유지·코드 작업은 worktree, 실제 API 소량 호출, 실행 중 호출 금지, 키 비노출, 실행 감시 시 보고만), 테스트·dry-run 점검 단계 추가
+- [x] `docs/STAGES.md` 맨 위에 제목 없이 있던 2026-05-21 항목 4개를 "완료된 단계"로 옮김
 
 ## 이전 다음 작업
 - [x] run_daily.sh에 DuckDB 검증 단계 포함
