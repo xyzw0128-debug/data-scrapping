@@ -10,7 +10,7 @@ The design, budgets, and the stockpred data contract are in [`docs/DESIGN.md`](d
 
 - Core universe collected every trading day: 23 ETFs (`config/core_etfs.txt`) + current S&P 500 members + optional `config/core_extra.txt`.
 - Rotation universe collected with the remaining budget: the NASDAQ list (`config/symbols.txt`) plus symbols that left the S&P 500. Never-collected symbols first, then the stalest.
-- Weekly universe refresh (`src.universe`): S&P 500 membership from the same public CSV stockpred uses, the NASDAQ list from Twelve Data, and delisted marks for symbols absent from Twelve Data's US catalogs (their rows are kept; they are no longer requested).
+- Weekly universe refresh (`src.universe`, sooner when the NASDAQ list is missing or empty): S&P 500 membership from the same public CSV stockpred uses, the NASDAQ list from Twelve Data, and delisted marks for symbols absent from Twelve Data's US catalogs (their rows are kept; they are no longer requested).
 - Twelve Data daily OHLCV with per-symbol full replacement (old split basis rows never linger), `adj_close` (dividend-adjusted close) for core symbols, and split events derived from raw vs split-adjusted prices.
 - Credit-based budgets: per-key daily budgets with reserve, a per-run credit cap, server-side usage sync (`/api_usage`), UTC day rollover during a run, and sequential multi-key rotation.
 - Session awareness: bars of an unfinished session are never stored; NYSE holidays are handled.

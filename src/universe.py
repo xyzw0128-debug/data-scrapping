@@ -248,11 +248,22 @@ def refresh_universe(
     return summary
 
 
-def is_stale(universe: Universe, max_age_days: float, now: datetime | None = None) -> bool:
+def refresh_reason(universe: Universe, max_age_days: float, now: datetime | None = None, need_nasdaq: bool = True) -> str | None:
+    """Why a refresh is due, or None while the last refresh is still fresh.
+
+    An empty NASDAQ list (config/symbols.txt missing or without valid tickers) is due right
+    away, however recent the last refresh: the file is gitignored and a branch switch can
+    delete it, which shrinks rotation and news to former core members. ``need_nasdaq=False``
+    (--skip-catalog) ignores it because that refresh does not rewrite the list.
+    """
     if not universe.refreshed_at:
-        return True
+        return "never_refreshed"
+    if need_nasdaq and not universe.nasdaq:
+        return "nasdaq_list_missing"
     refreshed = datetime.fromisoformat(universe.refreshed_at.replace("Z", "+00:00"))
-    return (now or datetime.now(UTC)) - refreshed >= timedelta(days=max_age_days)
+    if (now or datetime.now(UTC)) - refreshed >= timedelta(days=max_age_days):
+        return "max_age"
+    return None
 
 
 def parse_args() -> argparse.Namespace:
@@ -276,12 +287,15 @@ def main() -> int:
     try:
         with pipeline_lock(args.data_dir):
             universe = load_universe(args.data_dir, args.config_dir)
-            due = args.force or is_stale(universe, args.max_age_days)
+            reason = "forced" if args.force else refresh_reason(universe, args.max_age_days, need_nasdaq=not args.skip_catalog)
+            due = reason is not None
             if args.dry_run:
                 result = {
                     "status": "dry_run",
                     "refresh_due": due,
+                    "reason": reason,
                     "refreshed_at": universe.refreshed_at,
+                    "nasdaq_count": len(universe.nasdaq),
                     "sp500_count": len(universe.sp500),
                     "sp500_as_of": universe.sp500_as_of,
                     "core_count": len(universe.core_symbols()),
@@ -303,7 +317,7 @@ def main() -> int:
                     client = TwelveDataClient(config, KeyPool.from_env(config, state), PerMinuteRateLimiter(config.per_minute_limit), RunCreditCap(None), logger)
                     catalog = client.request
                 refreshed = refresh_universe(args.data_dir, args.config_dir, catalog, dry_run=args.check, tracked_extra=tracked)
-                result = {"status": "checked" if args.check else "refreshed", **refreshed}
+                result = {"status": "checked" if args.check else "refreshed", "reason": reason, **refreshed}
     except LockHeldError as exc:
         return lock_held_exit(exc)
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
