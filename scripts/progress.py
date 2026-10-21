@@ -19,17 +19,34 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.lock import pipeline_running  # noqa: E402
+from src.env import load_project_env  # noqa: E402
+from src.finnhub_news import universe_news_symbols  # noqa: E402
+from src.lock import PIPELINE_LOCK_NAME, pipeline_running  # noqa: E402
 from src.market_calendar import expected_session  # noqa: E402
 from src.universe import load_universe  # noqa: E402
 
 DATA_DIR       = ROOT / "data"
 STATE_PATH     = DATA_DIR / "state" / "state.json"
 PROVIDERS_PATH = ROOT / "config" / "providers.yaml"
+PROC_ROOT      = Path("/proc")
 
 # ── 상수 ──────────────────────────────────────────────────────────────────────
 BAR_WIDTH       = 38
 REFRESH_SEC     = 60
+
+# run_daily.sh 단계 모듈 → 표시 이름 (src.discord_status는 단계가 아니라 제외)
+STAGE_NAMES = {
+    "src.universe":        "종목 목록 갱신",
+    "src.main":            "Twelve Data",
+    "src.fred":            "FRED",
+    "src.snapshot":        "스냅숏",
+    "src.alpha_vantage":   "Alpha Vantage",
+    "src.indicators":      "지표 계산",
+    "src.finnhub_news":    "뉴스(Finnhub)",
+    "src.summary":         "요약",
+    "src.validate_duckdb": "DuckDB 검증",
+}
+NEWS_STAGE = STAGE_NAMES["src.finnhub_news"]
 
 
 # ── ANSI 컬러 ─────────────────────────────────────────────────────────────────
@@ -78,6 +95,15 @@ def universe_counts() -> tuple[list[str], int]:
         return [], 0
     core = universe.core_symbols()
     return core, len(core) + len(universe.rotation_symbols())
+
+
+def parse_iso(value: object) -> datetime | None:
+    """ISO 시각을 시간대 있는 datetime으로(시간대가 없으면 UTC). 못 읽으면 None."""
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def load_provider_limits() -> dict[str, int]:
@@ -218,6 +244,138 @@ def render_key_pool(slots: list[dict], limits: dict[str, int]) -> list[str]:
     return lines
 
 
+# ── 파이프라인 잠금과 실행 중인 단계 ───────────────────────────────────────────
+def lock_info(lock_path: Path) -> dict:
+    """잠금 파일의 pid·holder와 잠금을 잡은 시각(파일 수정 시각).
+
+    run_daily.sh와 단독 실행 CLI는 잠금을 잡을 때 내용을 새로 쓰고, run_daily.sh가 띄운
+    단계는 잠금 파일을 쓰지 않으므로 수정 시각이 곧 이번 실행의 시작 시각이다.
+    """
+    try:
+        text = lock_path.read_text(encoding="utf-8")
+        since = datetime.fromtimestamp(lock_path.stat().st_mtime, UTC).replace(microsecond=0)
+    except OSError:
+        return {}
+    info: dict = {"since": since}
+    for line in text.splitlines():
+        key, _, value = line.partition("=")
+        if key == "pid" and value.strip().isdigit():
+            info["pid"] = int(value)
+        elif key == "holder":
+            info["holder"] = value.strip()
+    return info
+
+
+def _cmdline(proc_root: Path, pid: int) -> list[str]:
+    try:
+        raw = (proc_root / str(pid) / "cmdline").read_bytes()
+    except OSError:
+        return []
+    return [part.decode("utf-8", "replace") for part in raw.split(b"\0") if part]
+
+
+def _children(proc_root: Path, pid: int) -> list[int]:
+    children = []
+    for stat in proc_root.glob("[0-9]*/stat"):
+        try:
+            # "pid (comm) state ppid ..." — comm에 공백·괄호가 있을 수 있어 마지막 ')' 뒤를 쓴다.
+            fields = stat.read_text(encoding="utf-8").rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        if len(fields) > 1 and fields[1] == str(pid):
+            children.append(int(stat.parent.name))
+    return sorted(children)
+
+
+def stage_of(argv: list[str]) -> str | None:
+    """명령줄의 단계 이름. `python -m src.snapshot --phase core` → "스냅숏 (core)"."""
+    if any(Path(arg).name == "rclone_backup.sh" for arg in argv):
+        return "백업"
+    if "-m" not in argv:
+        return None
+    index = argv.index("-m")
+    name = STAGE_NAMES.get(argv[index + 1] if index + 1 < len(argv) else "")
+    if name and "--phase" in argv:
+        phase_index = argv.index("--phase")
+        if phase_index + 1 < len(argv):
+            name = f"{name} ({argv[phase_index + 1]})"
+    return name
+
+
+def running_stage(pid: int | None, proc_root: Path = PROC_ROOT) -> str | None:
+    """잠금 보유 프로세스(단독 실행 CLI) 또는 그 자식(run_daily.sh가 띄운 단계)의 단계 이름."""
+    if pid is None:
+        return None
+    for candidate in [pid, *_children(proc_root, pid)]:
+        name = stage_of(_cmdline(proc_root, candidate))
+        if name:
+            return name
+    return None
+
+
+# ── 뉴스 진행도 ───────────────────────────────────────────────────────────────
+def news_progress(since: datetime, path: Path) -> tuple[int, int, datetime | None]:
+    """since 이후 뉴스 수집을 시도한 종목 수, 그중 실패 수, 가장 이른 시도 시각.
+
+    finnhub_news.json은 10종목마다 저장되므로 화면 숫자는 최대 9종목 늦을 수 있다.
+    """
+    try:
+        symbols = json.loads(path.read_text(encoding="utf-8")).get("symbols", {})
+    except (OSError, ValueError, AttributeError):
+        return 0, 0, None
+    attempted = failed = 0
+    first: datetime | None = None
+    for entry in symbols.values() if isinstance(symbols, dict) else []:
+        if not isinstance(entry, dict):
+            continue
+        stamp = parse_iso(entry.get("last_attempt_at"))
+        if stamp is None or stamp < since:
+            continue
+        attempted += 1
+        failed += entry.get("status") == "failed"
+        first = stamp if first is None or stamp < first else first
+    return attempted, failed, first
+
+
+def news_planned() -> int:
+    """뉴스 단계 대상 종목 수(src.finnhub_news 기본 선택, FINNHUB_LIMIT 반영). 못 세면 0."""
+    try:
+        total = len(universe_news_symbols(load_universe(DATA_DIR), {}, {}, None))
+    except Exception:
+        return 0
+    limit = os.environ.get("FINNHUB_LIMIT", "").strip()
+    return min(total, int(limit)) if limit.isdigit() else total
+
+
+def render_pipeline_stage() -> None:
+    """잠금은 잡혀 있는데 current_run이 없을 때: Twelve Data 외 단계(FRED·스냅숏·지표·뉴스 등)."""
+    info = lock_info(DATA_DIR / "state" / PIPELINE_LOCK_NAME)
+    since = info.get("since")
+    stage = running_stage(info.get("pid")) or "Twelve Data 외 단계"
+    print(f"\n  상태   {c(C.BGRN, '● 실행 중')}   단계 {c(C.BOLD, stage)}")
+    if since is not None:
+        print(f"  경과   {c(C.BOLD, fmt_elapsed(since.isoformat()))}   시작 {c(C.DIM, fmt_time(since.isoformat()))}")
+    if info.get("pid"):
+        holder = f"{info.get('holder') or '-'} (pid {info['pid']})"
+        print(f"  잠금   {c(C.DIM, holder)}")
+    if since is None:
+        return
+    attempted, failed, first = news_progress(since, DATA_DIR / "state" / "finnhub_news.json")
+    if not attempted and stage != NEWS_STAGE:
+        return
+    planned = max(news_planned(), attempted, 1)
+    if attempted >= planned:
+        eta = "완료"
+    elif first is not None:
+        eta = fmt_eta(attempted, planned, first.isoformat())
+    else:
+        eta = "?"
+    print()
+    print(c(C.DIM, "  ── 뉴스 진행도 (이번 실행) ────────────────────"))
+    print(f"  {progress_bar(attempted, planned, color=C.BYLW)}")
+    print(f"  {attempted} / {planned} 종목 시도  {c(C.BRED, f'✗{failed}')}   ETA {c(C.BCYN, eta)}")
+
+
 # ── 최근 실패 심볼 ─────────────────────────────────────────────────────────────
 def recent_failures(state: dict, n: int = 5) -> list[str]:
     symbols = state.get("symbols", {})
@@ -299,8 +457,12 @@ def render(state: dict | None, limits: dict[str, int]) -> None:
               f"{c(C.BRED, f'✗{failed}')}  "
               f"{c(C.BYLW, f'⏭{skipped}')}")
 
+    # ── 실행 중 (잠금은 있는데 current_run 없음: Twelve Data 외 단계) ───────────
+    elif lock_exists:
+        render_pipeline_stage()
+
     # ── 비정상 종료 (lock 없는데 current_run 남아있음) ────────────────────────
-    elif current and not lock_exists:
+    elif current:
         updated_at = fmt_time(current.get("updated_at", ""))
         print(f"\n  상태   {c(C.BYLW, '⚠  비정상 종료 감지')}")
         print(f"  {c(C.DIM, '└ 파이프라인 잠금 없음 — 프로세스가 중간에 종료된 것 같습니다')}")
@@ -377,6 +539,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    load_project_env(ROOT)  # FINNHUB_LIMIT 같은 실행 설정을 run_daily.sh와 같게 읽는다
     args = parse_args()
     limits = load_provider_limits()
 

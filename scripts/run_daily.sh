@@ -69,9 +69,14 @@ run_stage() {
   fi
 }
 
+# Discord status is informational: a failed update is logged and never stops the run (set -e).
 update_discord_status() {
   if [[ "$SEND_DISCORD" == "1" ]]; then
-    "$PYTHON_BIN" -m src.discord_status "$@"
+    local status=0
+    "$PYTHON_BIN" -m src.discord_status "$@" || status=$?
+    if [[ "$status" -ne 0 ]]; then
+      printf '[%s] Discord status update failed with exit code %s; continuing\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$status" >&2
+    fi
   fi
 }
 

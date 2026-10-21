@@ -68,6 +68,12 @@
 - [x] systemd 사용자 타이머 켜기(`scripts/install_local.sh`, 첫 실행 2026-10-21 05:10 KST)
 - [x] stockpred 스냅숏 어댑터(`SnapshotSource`, `data.price_source: snapshot`로 선택)와 Yahoo 대조 스크립트(stock_test `feat/snapshot-price-source` 브랜치): 핵심 3종목 허용 오차 통과
 
+## 2026-10-21 첫 타이머 실행 후속 수정
+- [x] `src.summary`: 요약 파일 저장이 `except LockHeldError` 블록의 `return` 뒤에 있어 실행되지 않던 문제 수정(`data/logs/daily/<date>.json` 생성, Discord 전송보다 먼저 저장)
+- [x] `src.twelve_data`: `http.client.HTTPException`(`IncompleteRead`·`BadStatusLine` 등)을 결과 불확실 시도로 처리(크레딧 차감, 1회 재시도 후 그 종목만 실패). 핵심 수집 단계 전체가 중단되던 문제 해결. HTTP 오류 본문을 못 읽으면 상태 코드와 사유로 처리
+- [x] `scripts/progress.py`: 잠금은 잡혀 있는데 `current_run`이 없으면 "실행 중"과 현재 단계(FRED·스냅숏·지표·뉴스 등) 표시, 뉴스 진행률(이번 실행 시도 수 / 대상 종목 수) 표시. 상태 파일 형식은 그대로
+- [x] `scripts/run_daily.sh`: `SEND_DISCORD=1`일 때 Discord 상태 갱신 실패가 `set -e`로 실행 전체를 멈추지 않도록 경고만 남김
+
 ## 이전 다음 작업
 - [x] run_daily.sh에 DuckDB 검증 단계 포함
 - [x] Pi 배포 스크립트(install_pi.sh) 및 배포 가이드(DEPLOYMENT.md) 추가 → 2026-10-20 `install_local.sh`로 교체

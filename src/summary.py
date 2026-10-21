@@ -86,7 +86,9 @@ def main()->int:
     try:
         with pipeline_lock(a.data_dir): s=build_summary(a.data_dir)
     except LockHeldError as exc:
-        return lock_held_exit(exc); out=a.output or a.data_dir/"logs"/"daily"/f"{s['date']}.json"; s['summary_path']=str(save_summary(out,s))
+        return lock_held_exit(exc)
+    # Saved before the optional Discord message so a webhook failure never loses the summary file.
+    out=a.output or a.data_dir/"logs"/"daily"/f"{s['date']}.json"; s['summary_path']=str(save_summary(out,s))
     if a.send_discord:
         u=os.environ.get(a.discord_webhook_env,"")
         if not u: raise RuntimeError(f"Missing Discord webhook environment variable: {a.discord_webhook_env}")

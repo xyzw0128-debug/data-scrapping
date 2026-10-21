@@ -28,7 +28,7 @@ from src.lock import LockHeldError, lock_held_exit, pipeline_lock
 from src.rate_limit import PerMinuteRateLimiter
 from src.state import load_state, save_state, utc_now_iso
 from src.storage import connect_db, ensure_data_dirs, get_db_path, save_raw_latest, upsert_news_db
-from src.universe import load_universe
+from src.universe import Universe, load_universe
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -126,6 +126,12 @@ def choose_news_symbols(
         ),
     )
     return ranked if limit is None else ranked[:limit]
+
+
+def universe_news_symbols(universe: Universe, news_state: dict, liquidity: dict[str, float], limit: int | None) -> list[str]:
+    """The default selection of a run: every active symbol, core symbols first."""
+    active = [s for s in [*universe.nasdaq, *sorted(universe.former_core)] if s not in universe.delisted]
+    return choose_news_symbols(active, news_state, liquidity, limit, priority=universe.core_symbols())
 
 
 def fetch_json(url: str, rate_limiter: PerMinuteRateLimiter | None = None) -> list[dict] | dict:
@@ -250,8 +256,7 @@ def run(args: argparse.Namespace) -> dict:
         symbols = choose_news_symbols(load_symbols(args.symbols), news_state, load_liquidity(args.data_dir), args.limit)
     else:
         universe = load_universe(args.data_dir, args.config_dir)
-        active = [s for s in [*universe.nasdaq, *sorted(universe.former_core)] if s not in universe.delisted]
-        symbols = choose_news_symbols(active, news_state, load_liquidity(args.data_dir), args.limit, priority=universe.core_symbols())
+        symbols = universe_news_symbols(universe, news_state, load_liquidity(args.data_dir), args.limit)
     end = date.fromisoformat(args.to_date) if args.to_date else datetime.now(UTC).date()
     fixed_range = resolve_date_range(args.from_date, args.to_date, args.days_back) if args.from_date else None
 
