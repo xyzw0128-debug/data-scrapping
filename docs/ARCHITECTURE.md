@@ -34,12 +34,14 @@ systemd/
 - `src/storage.py`: DuckDB 스키마·버전 마이그레이션, 뷰(`*_typed`, `prices_daily`), 배치 업서트, 종목 통째 교체, 분할 이벤트 저장, gzip 원본 저장.
 - `src/lock.py`: 파이프라인 잠금(flock). `run_daily.sh`가 잡으면 하위 CLI는 상속하고, 단독 실행 CLI는 직접 잡습니다.
 - `src/export_dataset.py`: 시점 누수 없는 ML 데이터셋 내보내기(개인용 FRED 시리즈 기본 제외).
-- `src/summary.py`: 일일 요약(테이블 건수, 마지막 수집 상태, 디스크, CPU 온도 `k10temp`).
-- `src/validate_duckdb.py`: OHLCV 중복/범위 검증. `src/validate.py`: 과거 CSV 검증(호환용).
+- `src/summary.py`: 일일 요약(테이블 건수, 마지막 수집 상태, `market.db`·스냅숏 파일 크기, 디스크, CPU 온도 `k10temp`).
+- `src/validate_duckdb.py`: OHLCV 중복/범위 검증. `src/validate.py`: 과거 CSV 검증 CLI(호환용으로만 유지, 다른 모듈은 의존하지 않음).
 - `src/alpha_vantage.py`: Alpha Vantage 백업 수집기(기본 꺼짐; 같은 `ohlcv` 테이블에 덮어쓰고 분할 미반영 가격이라 켜면 기준이 섞임).
 - `src/fetch_tickers.py`: 단독 티커 목록 갱신 도구(일상 운영은 `src.universe`가 대신함).
+- `src/catalog.py`: Twelve Data 카탈로그(`/stocks`, `/etfs`) 응답에서 티커 추출, `symbols.txt` 저장(`universe`·`fetch_tickers` 공용).
 - `src/discord_status.py`: Discord 실시간 상태 메시지.
 - `src/config.py`, `src/state.py`, `src/env.py`, `src/logging_utils.py`: 설정·상태 파일·`.env`·로그 공용 모듈.
+- `src/atomic_io.py`: 원자적 파일 저장(`<이름>.tmp` → fsync → `os.replace`). 상태·요약·검증 리포트·raw·종목 목록 파일이 모두 이 함수를 씁니다. JSON의 DATE/TIMESTAMP 값은 ISO 문자열로 저장합니다.
 
 ## 데이터 흐름
 

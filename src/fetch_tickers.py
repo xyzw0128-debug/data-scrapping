@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from src.catalog import atomic_write_symbols, extract_symbols
 from src.config import load_provider_config, load_symbols
 from src.env import load_project_env
 from src.lock import LockHeldError, lock_held_exit, pipeline_lock
@@ -38,43 +39,6 @@ def fetch_json(url: str) -> dict:
     request = Request(url, headers={"User-Agent": "data-scrapping-fetch-tickers/0.1"})
     with urlopen(request, timeout=30) as response:
         return json.loads(response.read().decode("utf-8"))
-
-
-def extract_symbols(payload: dict) -> list[str]:
-    if payload.get("status") == "error":
-        message = payload.get("message") or payload.get("code") or "unknown Twelve Data error"
-        raise ValueError(f"Twelve Data stocks endpoint error: {message}")
-
-    data = payload.get("data")
-    if not isinstance(data, list):
-        raise ValueError("Twelve Data stocks response missing data list")
-
-    symbols: list[str] = []
-    seen: set[str] = set()
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        raw_symbol = item.get("symbol")
-        if not raw_symbol:
-            continue
-        symbol = str(raw_symbol).strip().upper()
-        if not symbol or symbol in seen:
-            continue
-        seen.add(symbol)
-        symbols.append(symbol)
-    symbols.sort()
-    return symbols
-
-
-def atomic_write_symbols(path: Path, symbols: list[str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f"{path.name}.tmp")
-    with tmp_path.open("w", encoding="utf-8") as handle:
-        for symbol in symbols:
-            handle.write(f"{symbol}\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp_path, path)
 
 
 def merge_symbols(existing: list[str], fetched: list[str]) -> list[str]:

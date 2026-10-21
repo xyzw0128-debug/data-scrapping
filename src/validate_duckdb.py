@@ -6,9 +6,9 @@ import argparse
 import json
 from pathlib import Path
 
+from src.atomic_io import atomic_write_json, json_default
 from src.lock import LockHeldError, lock_held_exit, pipeline_lock
 from src.storage import get_db_path
-from src.validate import save_report
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -74,8 +74,8 @@ def main() -> int:
     except LockHeldError as exc:
         return lock_held_exit(exc)
     output = args.output or args.data_dir / "logs" / "validation" / "duckdb_latest.json"
-    report["report_path"] = str(save_report(output, report))
-    print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
+    report["report_path"] = str(atomic_write_json(output, report))
+    print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, default=json_default))
     return 1 if args.fail_on_issues and report.get("issue_count") else 0
 
 

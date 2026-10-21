@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from src.atomic_io import atomic_write_bytes, atomic_write_json
 from src.state import utc_now_iso, utc_today
 
 
@@ -236,22 +237,12 @@ def _upsert(
     return str(db_path)
 
 
-def _atomic_write_bytes(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(path.name + ".tmp")
-    with tmp_path.open("wb") as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp_path, path)
-
-
 def save_raw_json(data_dir: Path, provider: str, symbol: str, payload: dict[str, Any]) -> Path:
     """Archive a response as a new timestamped file (small, infrequent responses)."""
     safe_symbol = symbol.replace("/", "_")
     stamp = utc_now_iso().replace(":", "").replace("-", "")
     path = data_dir / "raw" / provider / f"{safe_symbol}_{stamp}.json"
-    _atomic_write_bytes(path, (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+    atomic_write_bytes(path, (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"))
     return path
 
 
@@ -263,7 +254,7 @@ def save_raw_latest(data_dir: Path, provider: str, name: str, payload: Any) -> P
     """
     safe_name = name.replace("/", "_")
     path = data_dir / "raw" / provider / f"{safe_name}.json.gz"
-    _atomic_write_bytes(path, gzip.compress(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")))
+    atomic_write_bytes(path, gzip.compress(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")))
     return path
 
 
@@ -345,7 +336,12 @@ def replace_split_events(data_dir: Path, symbol: str, events: list[tuple[str, fl
 
 
 def load_closes(data_dir: Path, symbol: str) -> dict[str, float]:
-    """Stored split-adjusted closes of a symbol by date (empty when absent)."""
+    """Stored split-adjusted closes of a symbol by ISO date string (empty when absent).
+
+    Keys are strings whatever the column type, so they match the provider's "YYYY-MM-DD" dates;
+    a DATE column would otherwise return datetime.date keys that never match and silently
+    disable split detection and split-event derivation.
+    """
     if not get_db_path(data_dir).exists():
         return {}
     con = _connect_db(data_dir)
@@ -353,7 +349,7 @@ def load_closes(data_dir: Path, symbol: str) -> dict[str, float]:
         rows = con.execute("SELECT date, TRY_CAST(close AS DOUBLE) FROM ohlcv WHERE symbol = ?", [symbol]).fetchall()
     finally:
         con.close()
-    return {day: close for day, close in rows if close is not None}
+    return {str(day): close for day, close in rows if close is not None}
 
 
 def indicator_values(symbol: str, rows: list[dict[str, str]], updated_at: str) -> list[list[str]]:
@@ -398,7 +394,8 @@ def upsert_news_db(data_dir: Path, symbol: str, rows: list[dict[str, str]]) -> s
 
 
 def _ohlcv_dict(record: Sequence[Any]) -> dict[str, str]:
-    return {field: str(value or "") for field, value in zip(OHLCV_FIELDS, record)}
+    # Only NULL becomes ""; a numeric 0 (e.g. zero volume) must stay "0".
+    return {field: "" if value is None else str(value) for field, value in zip(OHLCV_FIELDS, record)}
 
 
 def load_ohlcv_rows_db(data_dir: Path, symbol: str) -> list[dict[str, str]]:
@@ -429,14 +426,5 @@ def load_ohlcv_rows_for_symbols(con, symbols: Sequence[str]) -> dict[str, list[d
 
 def save_run_summary(data_dir: Path, summary: dict[str, Any]) -> Path:
     run_dir = data_dir / "logs" / "runs"
-    run_dir.mkdir(parents=True, exist_ok=True)
     stamp = str(summary.get("finished_at") or utc_now_iso()).replace(":", "").replace("-", "")
-    path = run_dir / f"{utc_today()}_{stamp}.json"
-    tmp_path = path.with_suffix(".json.tmp")
-    with tmp_path.open("w", encoding="utf-8") as handle:
-        json.dump(summary, handle, ensure_ascii=False, indent=2, sort_keys=True)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp_path, path)
-    return path
+    return atomic_write_json(run_dir / f"{utc_today()}_{stamp}.json", summary)

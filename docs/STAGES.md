@@ -76,6 +76,13 @@
 - [x] `src.universe`: NASDAQ 목록(`config/symbols.txt`)이 없거나 비어 있으면 마지막 갱신이 7일 안이어도 갱신(운영 폴더 브랜치 전환으로 파일이 지워져 순환 28종목·뉴스 약 555종목으로 줄던 문제). 갱신 이유를 결과 JSON `reason`(`forced`/`never_refreshed`/`nasdaq_list_missing`/`max_age`)에 기록, `--dry-run`은 `nasdaq_count`도 보고. `--skip-catalog`는 목록을 다시 쓰지 않으므로 이 조건을 보지 않음. 카탈로그 호출은 0크레딧
 - [x] `src.twelve_data`: 핵심 단계가 실행당 상한을 다 쓴 뒤의 순환 단계에서 `sync_usage()`가 키를 `usage_sync_failed: run_credit_cap`으로 제외하고 경고를 남기던 문제 수정. 상한이 `/api_usage` 1크레딧을 못 내면 조회 없이 `usage_sync`에 `skipped: run_credit_cap`만 남기고 키를 제외하지 않음(상한이 그 실행의 유료 호출을 모두 막으므로 reserve 영향 없음). 키 예산 부족 건너뛰기와 두 번 실패한 키 제외는 그대로이고, 실제 실패 뒤 재시도가 예산에 막혀 제외될 때는 사유를 `run_credit_cap`이 아닌 실제 실패로 기록
 
+## 2026-10-21 효율 개선 1단계: 구조 정리·관측·스키마 v4 대비
+- [x] `src.atomic_io`: 원자적 저장 공용 함수. `state.json`·실행 요약·일일 요약·검증 리포트·Discord 상태·`universe.json`·S&P CSV·`symbols.txt`·raw gzip 저장 8곳을 교체. 일일 요약·Discord 상태·검증 리포트에 빠져 있던 fsync 추가. 직렬화에 실패하면 기존 파일을 그대로 두고, JSON의 DATE/TIMESTAMP는 ISO 문자열로 저장. 파일 형식은 그대로
+- [x] `src.catalog`: `extract_symbols`·`atomic_write_symbols`를 `src.fetch_tickers`에서 분리(`src.universe`가 단독 CLI 모듈에 의존하지 않음)
+- [x] `src.validate_duckdb`가 옛 CSV 모듈(`src.validate`)에 의존하지 않음. `src.validate` CLI는 호환용으로 유지
+- [x] 일일 요약에 `market.db`·스냅숏 파일 크기 기록(`files.db_files`, Discord `db_mb`·`snapshot_mb`). 매일 종목을 통째로 교체하면 지운 행의 공간이 회수되지 않아 파일이 커지는지 관측하기 위함. 운영 DB 복사본 시험(2026-10-21): 실제 저장 경로로 핵심 526종목 교체를 이틀 재현하면 2,273MB → 2,504MB → 2,581MB, `VACUUM`은 효과 없음, 새 파일로 재구성하면 원래 크기로 돌아옴
+- [x] 스키마 v4(DATE·숫자 열) 대비, v3(VARCHAR)에서는 결과 동일: `load_closes` 키를 ISO 문자열로 고정(DATE 키면 분할 감지·분할 이벤트 계산이 조용히 빈 결과를 내고 기존 분할 기록을 지움), `_ohlcv_dict`는 NULL만 빈 문자열로(거래량 0 보존), DuckDB 검증 리포트의 날짜 값 직렬화(저장·출력)
+
 ## 이전 다음 작업
 - [x] run_daily.sh에 DuckDB 검증 단계 포함
 - [x] Pi 배포 스크립트(install_pi.sh) 및 배포 가이드(DEPLOYMENT.md) 추가 → 2026-10-20 `install_local.sh`로 교체
@@ -88,3 +95,7 @@
 - [ ] rclone 백업 설정 후 백업 타이머 켜기
 - [ ] 상장폐지 종목 데이터 확보 검토(현재 심볼 목록 기준이라 생존 편향 존재; 2026-10-20부터는 상장폐지 종목 행을 보존)
 - [ ] FRED 최초 발표값(ALFRED vintage) 기반 거시지표 시점 정렬 검토(`first_seen_at`은 2026-10-20 이후 관측값부터 기록)
+- [ ] 효율 개선 2단계: DuckDB 스키마 v4(`ohlcv` DATE/DOUBLE/BIGINT, `indicators`의 중복 OHLCV 열 제거, 뷰 이름·타입 유지)와 공용 재구성 도구(잠금 안에서 `CHECKPOINT` → 연결 종료 → 같은 디렉터리 임시 파일에 재구성 → 검증 → 하드링크 백업 → `os.replace`, `memory_limit` 명시). 쓰기는 Python에서 정규화(날짜 ISO, 유한 실수, 정수 거래량, 이상 값은 그 종목만 실패). 정기 재구성은 파일이 재구성 직후 크기의 2배를 넘을 때 전체 스냅숏 직전에 실행. 스냅숏은 파일 복사 유지. 복사본 시험: 같은 조건 재구성 기준 2,120MB → 1,137MB, 변환 16.6초(memory_limit 2GB), 뷰 결과 체크섬 동일
+- [ ] 효율 개선 3단계: 2026-10-20 이전 raw 타임스탬프 파일(5,312개, 1.946GB)을 `docs/DESIGN.md` 보관 규칙 수정 후 tar.gz로 압축 보관(약 0.21GB). 원본 삭제는 대조 후 별도 확인
+- [ ] 바뀐 행만 upsert하는 쓰기 최적화 검토(2단계 이후 쌓인 파일 크기 기록을 보고 판단, 분할 기준 변경 시 전체 갱신·지표 재계산 필요)
+- 보류: Twelve Data 키별 병렬 수집 레인(총 크레딧은 그대로이고 단축되는 건 핵심 단계뿐, 약관 2.3(h)·(i) 위험). 시간 단축이 필요하고 Twelve Data가 키별 독립 한도 사용을 허용한다고 확인되면 재검토

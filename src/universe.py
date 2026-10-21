@@ -14,7 +14,6 @@ import csv
 import io
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -22,9 +21,10 @@ from pathlib import Path
 from typing import Callable
 from urllib.request import Request, urlopen
 
+from src.atomic_io import atomic_write_json, atomic_write_text
+from src.catalog import atomic_write_symbols, extract_symbols
 from src.config import load_provider_config, load_symbols
 from src.env import load_project_env
-from src.fetch_tickers import atomic_write_symbols, extract_symbols
 from src.lock import LockHeldError, lock_held_exit, pipeline_lock
 from src.state import load_state, utc_now_iso
 
@@ -151,16 +151,6 @@ def load_universe(data_dir: Path, config_dir: Path = ROOT / "config", symbols_pa
     )
 
 
-def _atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    with tmp.open("w", encoding="utf-8") as handle:
-        handle.write(text)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
-
-
 def save_universe(data_dir: Path, universe: Universe, extra: dict) -> None:
     payload = {
         "schema_version": 1,
@@ -170,7 +160,7 @@ def save_universe(data_dir: Path, universe: Universe, extra: dict) -> None:
         "delisted": universe.delisted,
         **extra,
     }
-    _atomic_write_text(universe_path(data_dir), json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
+    atomic_write_json(universe_path(data_dir), payload)
 
 
 def fetch_text(url: str) -> str:
@@ -241,7 +231,7 @@ def refresh_universe(
     summary["core_count"] = len(universe.core_symbols())
     summary["rotation_count"] = len(universe.rotation_symbols())
     if not dry_run:
-        _atomic_write_text(sp500_cache_path(data_dir), text)
+        atomic_write_text(sp500_cache_path(data_dir), text)
         if catalog is not None:
             atomic_write_symbols(config_dir / "symbols.txt", universe.nasdaq)
         save_universe(data_dir, universe, {})

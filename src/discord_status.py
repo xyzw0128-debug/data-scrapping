@@ -11,6 +11,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from src.atomic_io import atomic_write_json
 from src.env import load_project_env
 from src.state import utc_today
 
@@ -29,10 +30,7 @@ def _load(path: Path) -> dict:
 
 
 def _save(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_json(path, payload)
 
 
 def _count_progress(data_dir: Path, total: int) -> int:

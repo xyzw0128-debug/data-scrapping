@@ -1,10 +1,12 @@
-"""Legacy CSV validation helper."""
+"""Legacy CSV validation CLI, kept for compatibility (daily validation is src.validate_duckdb)."""
 
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
+
+from src.atomic_io import atomic_write_json
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -25,11 +27,7 @@ def validate_directory(data_dir: Path) -> dict[str, object]:
 
 
 def save_report(path: Path, report: dict[str, object]) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    tmp.replace(path)
-    return path
+    return atomic_write_json(path, report)
 
 
 def main() -> int:
