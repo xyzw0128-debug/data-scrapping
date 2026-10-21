@@ -168,6 +168,30 @@ class TwelveDataClientTest(unittest.TestCase):
         with self.assertRaises(BudgetExhaustedError):
             client.request("api_usage", {}, slot=client.key_pool.slots[0])
 
+    def test_usage_sync_skips_keys_when_run_cap_is_spent(self) -> None:
+        calls = []
+        client, state, sleeps = _client(lambda url: calls.append(url) or (200, {"daily_usage": 0}), cap=3)
+        client.cap.spend(3)  # an earlier phase of the same run used the whole cap
+        with self.assertNoLogs("test", level="WARNING"):
+            results = client.sync_usage()
+        self.assertEqual(results, [{"key_index": 0, "skipped": "run_credit_cap"}, {"key_index": 1, "skipped": "run_credit_cap"}])
+        self.assertEqual(calls, [], "no /api_usage call")
+        self.assertEqual([k["disabled_reason"] for k in client.key_pool.summary() if k["has_key"]], [None, None])
+        self.assertEqual((_used(state, 0), _used(state, 1), sleeps), (0, 0, []))
+        self.assertFalse(client.can_afford(1), "the cap still blocks every paid call")
+
+    def test_usage_sync_failure_keeps_reason_when_cap_blocks_retry(self) -> None:
+        def http_get(url):
+            raise OSError("timeout")
+
+        client, state, _ = _client(http_get, cap=2)
+        results = client.sync_usage()
+        self.assertTrue(results[0]["excluded"])
+        self.assertIn("timeout", results[0]["error"], "the network failure, not run_credit_cap, is the reason")
+        self.assertEqual(results[1], {"key_index": 1, "skipped": "run_credit_cap"})
+        self.assertEqual([k["disabled_reason"] is None for k in client.key_pool.summary() if k["has_key"]], [False, True])
+        self.assertEqual((_used(state, 0), client.cap.used), (2, 2), "both lost attempts are charged")
+
     def test_run_cap_blocks_calls(self) -> None:
         client, _, _ = _client(lambda url: (200, {"status": "ok", "values": []}), cap=1)
         client.time_series("AAPL", "splits")

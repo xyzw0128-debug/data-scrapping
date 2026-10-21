@@ -212,7 +212,9 @@ class TwelveDataClient:
 
         A key whose usage cannot be read after USAGE_SYNC_ATTEMPTS tries is excluded for the
         rest of the run: unseen external usage could otherwise eat into the daily reserve.
-        A key with no local budget left is not queried (it would not be used anyway).
+        A key with no local budget left is not queried (it would not be used anyway), and no
+        key is queried once the run credit cap cannot pay for /api_usage: the cap only grows
+        its usage, so it blocks every paid call for the rest of the run.
         """
         cost = CREDIT_COSTS["api_usage"]
         results = []
@@ -220,13 +222,17 @@ class TwelveDataClient:
             if not slot.budget.can_spend(cost).allowed:
                 results.append({"key_index": slot.index, "skipped": "no_local_budget"})
                 continue
+            if not self.cap.allows(cost):
+                results.append({"key_index": slot.index, "skipped": "run_credit_cap"})
+                continue
             error: Exception | None = None
             for attempt in range(1, USAGE_SYNC_ATTEMPTS + 1):
                 try:
                     payload = self.request("api_usage", {}, slot=slot)
                     server_used = int(payload["daily_usage"])
                 except BudgetExhaustedError as exc:
-                    error = exc
+                    # A retry blocked by a budget the failed attempt used up keeps that failure as the reason.
+                    error = error or exc
                     break
                 except (TwelveDataError, KeyError, ValueError, TypeError) as exc:
                     error = exc
