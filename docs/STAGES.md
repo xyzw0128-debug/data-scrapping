@@ -78,6 +78,7 @@
 ## 2026-10-21 에이전트 작업 규칙 갱신
 - [x] `AGENTS.md`를 개편 이후 상태로 갱신: 필수 읽기에 `docs/DESIGN.md`(설치·운영 작업은 `docs/DEPLOYMENT.md`) 추가, 크레딧 예산(실행당 상한 포함)·`data/state/` 상태 파일·파이프라인 잠금·dry-run·stockpred 스냅숏 계약 규칙, 운영 PC 주의사항(운영 폴더는 `main` 유지·코드 작업은 worktree, 실제 API 소량 호출, 실행 중 호출 금지, 키 비노출, 실행 감시 시 보고만), 테스트·dry-run 점검 단계 추가
 - [x] `docs/STAGES.md` 맨 위에 제목 없이 있던 2026-05-21 항목 4개를 "완료된 단계"로 옮김
+- [x] 변경 반영 방식을 PR 대신 로컬 fast-forward 병합으로 변경: worktree에서 테스트 → 수집이 돌지 않을 때 운영 폴더 `main`에 `git merge --ff-only` → `git push origin main`. 문서만 바꾸는 작업은 운영 폴더 `main`에서 바로 커밋 가능
 
 ## 2026-10-21 효율 개선 1단계: 구조 정리·관측·스키마 v4 대비
 - [x] `src.atomic_io`: 원자적 저장 공용 함수. `state.json`·실행 요약·일일 요약·검증 리포트·Discord 상태·`universe.json`·S&P CSV·`symbols.txt`·raw gzip 저장 8곳을 교체. 일일 요약·Discord 상태·검증 리포트에 빠져 있던 fsync 추가. 직렬화에 실패하면 기존 파일을 그대로 두고, JSON의 DATE/TIMESTAMP는 ISO 문자열로 저장. 파일 형식은 그대로

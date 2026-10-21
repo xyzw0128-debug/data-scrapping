@@ -25,6 +25,7 @@
 ## 2) 운영 PC에서 작업할 때 (Live)
 - 이 저장소는 매일 수집이 도는 실제 운영 PC입니다(systemd 사용자 타이머, 평일 16:10 New York 시간).
 - 운영 폴더(이 저장소 루트)는 `main`에 두고 브랜치를 바꾸지 않습니다. 타이머가 이 폴더의 코드를 그대로 실행하기 때문입니다. 코드 작업은 git worktree에서 합니다. `config/symbols.txt`를 추적하던 옛 커밋(`f8dde34` 이전)을 checkout했다가 돌아오면 이 파일이 지워집니다(다음 실행의 `src.universe`가 다시 받습니다).
+- 변경은 PR 없이 로컬에서 반영합니다. worktree에서 테스트를 통과하면, 수집이 돌지 않을 때(파이프라인 잠금이 없을 때) 운영 폴더에서 `git merge --ff-only <브랜치>`로 `main`을 앞으로 당기고 `git push origin main`으로 백업합니다. 운영 폴더의 브랜치는 바꾸지 않습니다. fast-forward가 안 되면 worktree에서 `main`을 병합하고 테스트를 다시 통과시킨 뒤 반영합니다. 문서만 바꾸는 작업은 수집이 돌지 않을 때 운영 폴더 `main`에서 바로 커밋해도 됩니다.
 - 실제 API 호출은 매일 수집과 같은 크레딧을 씁니다. 점검은 dry-run을 먼저 쓰고, 실제 호출은 `--only SPY`처럼 소량만 합니다.
 - 수집이 도는 중(파이프라인 잠금이 잡혀 있을 때)에는 실제 API를 호출하지 않습니다. 진행 상태는 `.venv/bin/python scripts/progress.py --once`로 봅니다.
 - 데이터 조회는 `market_snapshot.db`로 합니다. `market.db`를 열어 두면 수집기 쓰기가 실패합니다.
