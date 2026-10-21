@@ -17,7 +17,8 @@
 - README + 실제 코드(`src/`, `config/`, `scripts/`, `systemd/`)를 기준으로 판단합니다.
 - 코드에 없는 내용은 문서에 단정적으로 쓰지 않습니다.
 - API 제한 보수 운영을 절대 깨지 않습니다: 키별 일일 예산(`daily_limit - daily_reserve`), 실행당 크레딧 상한(`max_credits_per_run`), 분당 제한(`per_minute_limit`), `/api_usage` 서버 사용량 동기화, 결과가 불확실한 시도의 크레딧 차감.
-- 실행 중단 후 재개 가능하도록 `data/state/` 상태 파일 흐름을 유지합니다: `state.json`(provider 사용량·종목 상태), `universe.json`, `fred.json`(완료 판정에 사용), `finnhub_news.json`(뉴스 이어받기 창).
+- 실행 중단 후 재개 가능하도록 `data/state/` 상태 파일 흐름을 유지합니다: `state.json`(provider 사용량·종목 상태), `universe.json`, `fred.json`(완료 판정에 사용), `finnhub_news.json`(뉴스 이어받기 창), `db_maintenance.json`(정기 재구성 기준 크기).
+- `market.db` 파일은 `src.rebuild`(검증 → 하드링크 백업 → `os.replace`)로만 교체하고, 스키마는 제자리 `ALTER`로 바꾸지 않습니다(`docs/DESIGN.md` 5절 "스키마 버전 4와 재구성").
 - `market.db`나 `data/state/`를 쓰는 CLI는 `pipeline_lock`을 잡고, 잡지 못하면 `lock_held_exit()`(종료 코드 2)로 끝냅니다.
 - dry-run은 수집 API를 부르지 않고 상태 파일·DB에 아무것도 쓰지 않습니다.
 - stockpred 데이터 계약(`docs/DESIGN.md` 5절)을 깨지 않습니다: 다른 프로그램은 `market_snapshot.db`만 읽고, `prices_daily` 등 스냅숏 테이블·뷰의 컬럼 이름과 의미를 유지하며, 끝나지 않은 장의 봉은 저장하지 않습니다.

@@ -4,45 +4,61 @@ from __future__ import annotations
 
 import gzip
 import json
+import math
 import os
+import re
 import tempfile
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from src.atomic_io import atomic_write_bytes, atomic_write_json
+from src.atomic_io import atomic_write_bytes, atomic_write_json, json_default
 from src.state import utc_now_iso, utc_today
 
 
 OHLCV_FIELDS = ["date", "open", "high", "low", "close", "volume"]
+PRICE_FIELDS = ["open", "high", "low", "close"]
 INDICATOR_FIELDS = ["sma_20", "sma_50", "sma_200", "rsi_14", "macd_12_26", "macd_signal_9", "macd_hist"]
 MACRO_FIELDS = ["date", "value", "realtime_start", "realtime_end"]
 NEWS_FIELDS = ["id", "symbol", "datetime", "date", "headline", "source", "summary", "url", "image", "category"]
 
 OHLCV_COLUMNS = ["symbol", *OHLCV_FIELDS, "updated_at"]
 PRICE_COLUMNS = ["symbol", *OHLCV_FIELDS, "adj_close", "updated_at"]
-INDICATOR_COLUMNS = ["symbol", *OHLCV_FIELDS, *INDICATOR_FIELDS, "updated_at"]
+INDICATOR_COLUMNS = ["symbol", "date", *INDICATOR_FIELDS, "updated_at"]
 MACRO_COLUMNS = ["series_id", *MACRO_FIELDS, "first_seen_at", "updated_at"]
 NEWS_COLUMNS = ["symbol", "id", "datetime", "date", "headline", "source", "summary", "url", "image", "category", "updated_at"]
 SERIES_META_COLUMNS = ["series_id", "title", "frequency", "units", "release", "license_note", "personal_use_only", "updated_at"]
 
-SCHEMA_VERSION = 3
+# Version 4 stores ohlcv/indicators dates as DATE and values as DOUBLE/BIGINT (about half the
+# file size of the VARCHAR version 3). A version 3 file is converted once with
+# ``python -m src.rebuild --to-v4``; ensure_db_schema refuses to write to it until then.
+SCHEMA_VERSION = 4
+REBUILD_HINT = "python -m src.rebuild --to-v4"
 
-# Raw tables keep provider values as VARCHAR. These views expose the same rows with
-# DATE/DOUBLE/TIMESTAMP types for analysis and dataset export; unparseable values
-# (for example FRED's "." placeholder) become NULL.
+# ohlcv.updated_at stays VARCHAR: find_stale_symbols compares it with indicators.updated_at as
+# ISO strings. Column order matches version 3 (adj_close was appended in version 2).
+TABLE_SQL = {
+    "ohlcv": """CREATE TABLE IF NOT EXISTS ohlcv (symbol VARCHAR NOT NULL, date DATE NOT NULL, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume BIGINT, updated_at VARCHAR NOT NULL, adj_close DOUBLE, PRIMARY KEY(symbol, date))""",
+    "indicators": """CREATE TABLE IF NOT EXISTS indicators (symbol VARCHAR NOT NULL, date DATE NOT NULL, sma_20 DOUBLE, sma_50 DOUBLE, sma_200 DOUBLE, rsi_14 DOUBLE, macd_12_26 DOUBLE, macd_signal_9 DOUBLE, macd_hist DOUBLE, updated_at VARCHAR NOT NULL, PRIMARY KEY(symbol, date))""",
+    "macro": """CREATE TABLE IF NOT EXISTS macro (series_id VARCHAR NOT NULL, date VARCHAR NOT NULL, value VARCHAR, realtime_start VARCHAR, realtime_end VARCHAR, updated_at VARCHAR NOT NULL, first_seen_at VARCHAR, PRIMARY KEY(series_id, date))""",
+    "news": """CREATE TABLE IF NOT EXISTS news (symbol VARCHAR NOT NULL, id VARCHAR NOT NULL, datetime VARCHAR, date VARCHAR, headline VARCHAR, source VARCHAR, summary VARCHAR, url VARCHAR, image VARCHAR, category VARCHAR, updated_at VARCHAR NOT NULL, PRIMARY KEY(symbol, id))""",
+    "schema_meta": """CREATE TABLE IF NOT EXISTS schema_meta (key VARCHAR PRIMARY KEY, value VARCHAR)""",
+    "corporate_actions": """CREATE TABLE IF NOT EXISTS corporate_actions (symbol VARCHAR NOT NULL, date DATE NOT NULL, type VARCHAR NOT NULL, value DOUBLE NOT NULL, source VARCHAR, updated_at VARCHAR NOT NULL, PRIMARY KEY(symbol, date, type))""",
+    "symbol_status": """CREATE TABLE IF NOT EXISTS symbol_status (symbol VARCHAR PRIMARY KEY, yahoo_symbol VARCHAR, group_name VARCHAR, active BOOLEAN, delisted_at VARCHAR, last_bar_date DATE, last_success_at VARCHAR, core_session DATE, splits_complete BOOLEAN, updated_at VARCHAR)""",
+    "collection_runs": """CREATE TABLE IF NOT EXISTS collection_runs (run_id VARCHAR NOT NULL, phase VARCHAR NOT NULL, started_at VARCHAR, finished_at VARCHAR, session_date DATE, status VARCHAR, core_expected INTEGER, core_ok INTEGER, missing_symbols VARCHAR, fred_expected INTEGER, fred_ok INTEGER, missing_series VARCHAR, note VARCHAR, splits_ok INTEGER, missing_splits VARCHAR, universe_issue VARCHAR, PRIMARY KEY(run_id, phase))""",
+    "series_meta": """CREATE TABLE IF NOT EXISTS series_meta (series_id VARCHAR PRIMARY KEY, title VARCHAR, frequency VARCHAR, units VARCHAR, release VARCHAR, license_note VARCHAR, personal_use_only BOOLEAN, updated_at VARCHAR)""",
+}
+
+# Typed views for analysis, dataset export, and stockpred. Their names, columns, and types are
+# the same as in version 3 (where they cast VARCHAR columns); macro and news are still VARCHAR
+# tables, so unparseable values (for example FRED's "." placeholder) become NULL there.
 TYPED_VIEW_SQL = {
     "ohlcv_typed": """
-        SELECT symbol, TRY_CAST(date AS DATE) AS date,
-               TRY_CAST(open AS DOUBLE) AS open, TRY_CAST(high AS DOUBLE) AS high,
-               TRY_CAST(low AS DOUBLE) AS low, TRY_CAST(close AS DOUBLE) AS close,
-               TRY_CAST(volume AS DOUBLE) AS volume, TRY_CAST(adj_close AS DOUBLE) AS adj_close, updated_at
+        SELECT symbol, date, open, high, low, close, CAST(volume AS DOUBLE) AS volume, adj_close, updated_at
         FROM ohlcv""",
     "indicators_typed": """
-        SELECT symbol, TRY_CAST(date AS DATE) AS date,
-               TRY_CAST(sma_20 AS DOUBLE) AS sma_20, TRY_CAST(sma_50 AS DOUBLE) AS sma_50,
-               TRY_CAST(sma_200 AS DOUBLE) AS sma_200, TRY_CAST(rsi_14 AS DOUBLE) AS rsi_14,
-               TRY_CAST(macd_12_26 AS DOUBLE) AS macd_12_26, TRY_CAST(macd_signal_9 AS DOUBLE) AS macd_signal_9,
-               TRY_CAST(macd_hist AS DOUBLE) AS macd_hist, updated_at
+        SELECT symbol, date, sma_20, sma_50, sma_200, rsi_14, macd_12_26, macd_signal_9, macd_hist, updated_at
         FROM indicators""",
     "macro_typed": """
         SELECT series_id, TRY_CAST(date AS DATE) AS date, TRY_CAST(value AS DOUBLE) AS value,
@@ -55,41 +71,19 @@ TYPED_VIEW_SQL = {
     # stockpred contract: same column names and meaning as stockpred's STD_COLS (yfinance
     # auto_adjust=False, actions=True). close is split-adjusted, adj_close also reflects
     # dividends, splits is the ratio on split dates. Dividends are unavailable on a Basic key.
+    # volume stays DOUBLE as in version 3.
     "prices_daily": """
-        SELECT o.symbol, TRY_CAST(o.date AS DATE) AS date,
-               TRY_CAST(o.open AS DOUBLE) AS open, TRY_CAST(o.high AS DOUBLE) AS high,
-               TRY_CAST(o.low AS DOUBLE) AS low, TRY_CAST(o.close AS DOUBLE) AS close,
-               TRY_CAST(o.adj_close AS DOUBLE) AS adj_close, TRY_CAST(o.volume AS DOUBLE) AS volume,
-               0.0 AS dividends, coalesce(s.value, 0.0) AS splits
+        SELECT o.symbol, o.date, o.open, o.high, o.low, o.close, o.adj_close,
+               CAST(o.volume AS DOUBLE) AS volume, 0.0 AS dividends, coalesce(s.value, 0.0) AS splits
         FROM ohlcv o
         LEFT JOIN corporate_actions s
-          ON s.symbol = o.symbol AND s.type = 'split' AND s.date = TRY_CAST(o.date AS DATE)""",
+          ON s.symbol = o.symbol AND s.type = 'split' AND s.date = o.date""",
 }
 
-BASE_TABLE_SQL = [
-    """CREATE TABLE IF NOT EXISTS ohlcv (symbol VARCHAR NOT NULL, date VARCHAR NOT NULL, open VARCHAR, high VARCHAR, low VARCHAR, close VARCHAR, volume VARCHAR, updated_at VARCHAR NOT NULL, PRIMARY KEY(symbol, date))""",
-    """CREATE TABLE IF NOT EXISTS indicators (symbol VARCHAR NOT NULL, date VARCHAR NOT NULL, open VARCHAR, high VARCHAR, low VARCHAR, close VARCHAR, volume VARCHAR, sma_20 VARCHAR, sma_50 VARCHAR, sma_200 VARCHAR, rsi_14 VARCHAR, macd_12_26 VARCHAR, macd_signal_9 VARCHAR, macd_hist VARCHAR, updated_at VARCHAR NOT NULL, PRIMARY KEY(symbol, date))""",
-    """CREATE TABLE IF NOT EXISTS macro (series_id VARCHAR NOT NULL, date VARCHAR NOT NULL, value VARCHAR, realtime_start VARCHAR, realtime_end VARCHAR, updated_at VARCHAR NOT NULL, PRIMARY KEY(series_id, date))""",
-    """CREATE TABLE IF NOT EXISTS news (symbol VARCHAR NOT NULL, id VARCHAR NOT NULL, datetime VARCHAR, date VARCHAR, headline VARCHAR, source VARCHAR, summary VARCHAR, url VARCHAR, image VARCHAR, category VARCHAR, updated_at VARCHAR NOT NULL, PRIMARY KEY(symbol, id))""",
-    """CREATE TABLE IF NOT EXISTS schema_meta (key VARCHAR PRIMARY KEY, value VARCHAR)""",
-]
 
-# Schema version 2: adj_close, macro first_seen_at, corporate actions, snapshot status tables.
-MIGRATION_V2_SQL = [
-    "ALTER TABLE ohlcv ADD COLUMN IF NOT EXISTS adj_close VARCHAR",
-    "ALTER TABLE macro ADD COLUMN IF NOT EXISTS first_seen_at VARCHAR",
-    """CREATE TABLE IF NOT EXISTS corporate_actions (symbol VARCHAR NOT NULL, date DATE NOT NULL, type VARCHAR NOT NULL, value DOUBLE NOT NULL, source VARCHAR, updated_at VARCHAR NOT NULL, PRIMARY KEY(symbol, date, type))""",
-    """CREATE TABLE IF NOT EXISTS symbol_status (symbol VARCHAR PRIMARY KEY, yahoo_symbol VARCHAR, group_name VARCHAR, active BOOLEAN, delisted_at VARCHAR, last_bar_date DATE, last_success_at VARCHAR, core_session DATE, splits_complete BOOLEAN, updated_at VARCHAR)""",
-    """CREATE TABLE IF NOT EXISTS collection_runs (run_id VARCHAR NOT NULL, phase VARCHAR NOT NULL, started_at VARCHAR, finished_at VARCHAR, session_date DATE, status VARCHAR, core_expected INTEGER, core_ok INTEGER, missing_symbols VARCHAR, fred_expected INTEGER, fred_ok INTEGER, missing_series VARCHAR, note VARCHAR, PRIMARY KEY(run_id, phase))""",
-    """CREATE TABLE IF NOT EXISTS series_meta (series_id VARCHAR PRIMARY KEY, title VARCHAR, frequency VARCHAR, units VARCHAR, release VARCHAR, license_note VARCHAR, personal_use_only BOOLEAN, updated_at VARCHAR)""",
-]
+class SchemaVersionError(RuntimeError):
+    """market.db has a schema version this code does not write (not a per-symbol failure)."""
 
-# Schema version 3: completion details in collection_runs.
-MIGRATION_V3_SQL = [
-    "ALTER TABLE collection_runs ADD COLUMN IF NOT EXISTS splits_ok INTEGER",
-    "ALTER TABLE collection_runs ADD COLUMN IF NOT EXISTS missing_splits VARCHAR",
-    "ALTER TABLE collection_runs ADD COLUMN IF NOT EXISTS universe_issue VARCHAR",
-]
 
 _SCHEMA_READY: set[str] = set()
 
@@ -128,38 +122,60 @@ def connect_db(data_dir: Path, read_only: bool = False):
 _connect_db = connect_db
 
 
-def _schema_version(con) -> int:
+def schema_version(con) -> int | None:
+    """Schema version of an open database; None for an empty database (no tables yet)."""
+    tables = {row[0] for row in con.execute("SELECT table_name FROM duckdb_tables() WHERE database_name = current_database()").fetchall()}
+    if not tables:
+        return None
+    if "schema_meta" not in tables:
+        return 1
     row = con.execute("SELECT value FROM schema_meta WHERE key = 'version'").fetchone()
     return int(row[0]) if row else 1
 
 
+def create_views(con) -> None:
+    for view_name, sql in TYPED_VIEW_SQL.items():
+        con.execute(f"CREATE OR REPLACE VIEW {view_name} AS {sql}")
+
+
+def create_schema(con) -> None:
+    """Create every version 4 table and view and record the version (empty database)."""
+    for sql in TABLE_SQL.values():
+        con.execute(sql)
+    create_views(con)
+    con.execute("INSERT OR REPLACE INTO schema_meta VALUES ('version', ?)", [str(SCHEMA_VERSION)])
+
+
 def ensure_db_schema(data_dir: Path) -> Path:
-    """Create tables, apply migrations, and (re)create views once per process."""
+    """Create a new database at version 4, or check an existing one, once per process.
+
+    An older version is never migrated in place (that would rewrite the whole file and make it
+    larger): it raises SchemaVersionError naming the one-off conversion command instead.
+    """
     db_path = get_db_path(data_dir)
     if str(db_path) in _SCHEMA_READY and db_path.exists():
         return db_path
     con = _connect_db(data_dir)
     try:
+        version = schema_version(con)
+        if version is not None and version != SCHEMA_VERSION:
+            raise SchemaVersionError(
+                f"{db_path} has schema version {version}, this code writes version {SCHEMA_VERSION}. "
+                + (f"Convert it once under the pipeline lock: {REBUILD_HINT}" if version < SCHEMA_VERSION else "Update the code.")
+            )
         con.begin()
-        for sql in BASE_TABLE_SQL:
-            con.execute(sql)
-        version = _schema_version(con)
-        if version < 2:
-            for sql in MIGRATION_V2_SQL:
-                con.execute(sql)
-        if version < 3:
-            for sql in MIGRATION_V3_SQL:
-                con.execute(sql)
-        existing_views = {row[0] for row in con.execute("SELECT view_name FROM duckdb_views() WHERE NOT internal").fetchall()}
-        for view_name, sql in TYPED_VIEW_SQL.items():
-            if version < SCHEMA_VERSION or view_name not in existing_views:
-                con.execute(f"CREATE OR REPLACE VIEW {view_name} AS {sql}")
-        if version < SCHEMA_VERSION:
-            con.execute("INSERT OR REPLACE INTO schema_meta VALUES ('version', ?)", [str(SCHEMA_VERSION)])
-        con.commit()
-    except Exception:
-        con.rollback()
-        raise
+        try:
+            if version is None:
+                create_schema(con)
+            else:
+                existing_views = {row[0] for row in con.execute("SELECT view_name FROM duckdb_views() WHERE NOT internal AND database_name = current_database()").fetchall()}
+                for view_name, sql in TYPED_VIEW_SQL.items():
+                    if view_name not in existing_views:
+                        con.execute(f"CREATE VIEW {view_name} AS {sql}")
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
     finally:
         con.close()
     _SCHEMA_READY.add(str(db_path))
@@ -183,6 +199,10 @@ def bulk_upsert(
     batch is roughly a thousand times faster. JSON keeps strings exact, so empty
     strings, quotes, and newlines in news text round-trip unchanged.
 
+    read_json reads each column with the table's own type, so values must already be
+    normalized (numbers as numbers, dates as ISO strings, None for NULL): a typed read
+    rejects "", "abc", "1.5e3" for BIGINT, or an invalid date instead of guessing.
+
     By default a conflicting row is replaced. With ``update_columns`` only those
     columns are updated, so other columns of existing rows (e.g. first_seen_at) survive.
     """
@@ -199,10 +219,11 @@ def bulk_upsert(
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             for row in deduped.values():
-                handle.write(json.dumps(dict(zip(columns, row)), ensure_ascii=False))
+                handle.write(json.dumps(dict(zip(columns, row)), ensure_ascii=False, allow_nan=False, default=json_default))
                 handle.write("\n")
+        table_types = {row[0]: row[1] for row in con.execute(f"DESCRIBE {table}").fetchall()}
         column_list = ", ".join(columns)
-        column_types = ", ".join(f"'{column}': 'VARCHAR'" for column in columns)
+        column_types = ", ".join(f"'{column}': '{table_types[column]}'" for column in columns)
         select = f"SELECT {column_list} FROM read_json(?, format = 'newline_delimited', columns = {{{column_types}}})"
         if update_columns is None:
             sql = f"INSERT OR REPLACE INTO {table} ({column_list}) {select}"
@@ -258,47 +279,110 @@ def save_raw_latest(data_dir: Path, provider: str, name: str, payload: Any) -> P
     return path
 
 
-def normalize_twelve_data_ohlcv(payload: dict[str, Any]) -> list[dict[str, str]]:
+# Write policy for ohlcv values, applied in Python before staging (read_json then reads them
+# with the table types): the date must be an ISO "YYYY-MM-DD" calendar date, prices finite
+# numbers, volume a whole number >= 0 (0 is kept and differs from NULL). "" or a missing value
+# becomes NULL only for volume and adj_close; a missing date or price is an error. A ValueError
+# fails that one symbol and leaves its stored rows untouched.
+_DECIMAL_RE = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_BIGINT_MAX = 2**63 - 1
+
+
+def iso_date(value: Any) -> str:
+    if isinstance(value, str) and _ISO_DATE_RE.fullmatch(value):
+        try:
+            date.fromisoformat(value)
+            return value
+        except ValueError:
+            pass
+    raise ValueError(f"invalid date {value!r}")
+
+
+def price_value(value: Any, column: str, required: bool = True) -> float | None:
+    """A finite float; "" or None becomes None unless the column is required."""
+    if value is None or value == "":
+        if required:
+            raise ValueError(f"missing {column}")
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        number = float(value)
+    elif isinstance(value, str) and _DECIMAL_RE.fullmatch(value):
+        number = float(value)
+    else:
+        raise ValueError(f"invalid {column} {value!r}")
+    if not math.isfinite(number):
+        raise ValueError(f"invalid {column} {value!r}")
+    return number
+
+
+def volume_value(value: Any) -> int | None:
+    """A whole number >= 0 ("12345" and 12345.0 are accepted, 1.5 is not); "" or None becomes None."""
+    if value is None or value == "":
+        return None
+    number: int | None = None
+    if isinstance(value, int) and not isinstance(value, bool):
+        number = value
+    elif isinstance(value, float) and value.is_integer():
+        number = int(value)
+    elif isinstance(value, str) and _DECIMAL_RE.fullmatch(value):
+        parsed = Decimal(value)
+        if parsed == parsed.to_integral_value():
+            number = int(parsed)
+    if number is None or not 0 <= number <= _BIGINT_MAX:
+        raise ValueError(f"invalid volume {value!r}")
+    return number
+
+
+def normalize_ohlcv_row(item: dict[str, Any], date_key: str = "date") -> dict[str, Any]:
+    """Validate one bar into {"date": "YYYY-MM-DD", open/high/low/close: float, volume: int | None}."""
+    day = iso_date(item.get(date_key))
+    try:
+        row: dict[str, Any] = {"date": day}
+        for field in PRICE_FIELDS:
+            row[field] = price_value(item.get(field), field)
+        row["volume"] = volume_value(item.get("volume"))
+    except ValueError as exc:
+        raise ValueError(f"{exc} on {day}") from None
+    return row
+
+
+def normalize_twelve_data_ohlcv(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Date-ordered, validated bars of a time_series response (ValueError on any malformed bar)."""
     values = payload.get("values")
     if not isinstance(values, list):
         message = payload.get("message") or payload.get("status") or "missing values"
         raise ValueError(f"Twelve Data response has no values: {message}")
-    rows: list[dict[str, str]] = []
+    rows: list[dict[str, Any]] = []
     for item in values:
         if not isinstance(item, dict):
-            continue
-        row = {"date": str(item.get("datetime", "")), "open": str(item.get("open", "")), "high": str(item.get("high", "")), "low": str(item.get("low", "")), "close": str(item.get("close", "")), "volume": str(item.get("volume", ""))}
-        if row["date"]:
-            rows.append(row)
+            raise ValueError(f"Twelve Data value is not an object: {str(item)[:80]!r}")
+        rows.append(normalize_ohlcv_row(item, date_key="datetime"))
     rows.sort(key=lambda row: row["date"])
     return rows
 
 
-def upsert_ohlcv_db(data_dir: Path, symbol: str, rows: list[dict[str, str]]) -> str:
+def upsert_ohlcv_db(data_dir: Path, symbol: str, rows: list[dict[str, Any]]) -> str:
     now = utc_now_iso()
-    values = [
-        [symbol, *(row.get(field, "") for field in OHLCV_FIELDS), now]
-        for row in rows
-        if row.get("date")
-    ]
+    values = [[symbol, *(bar[field] for field in OHLCV_FIELDS), now] for bar in map(normalize_ohlcv_row, rows)]
     return _upsert(data_dir, "ohlcv", OHLCV_COLUMNS, ["symbol", "date"], values)
 
 
-def replace_symbol_prices(data_dir: Path, symbol: str, rows: list[dict[str, str]], adj_closes: dict[str, str] | None = None) -> str:
+def replace_symbol_prices(data_dir: Path, symbol: str, rows: list[dict[str, Any]], adj_closes: dict[str, Any] | None = None) -> str:
     """Replace every OHLCV row of a symbol in one transaction.
 
     Old rows outside the new response (an older split basis, or history beyond the
     5000-row window) are removed. The symbol's indicator rows are removed too, so the next
-    indicator run recalculates them from the new prices.
+    indicator run recalculates them from the new prices. Rows are validated first, so a
+    malformed value raises ValueError before anything is deleted.
     """
-    db_path = ensure_db_schema(data_dir)
     now = utc_now_iso()
     adj_closes = adj_closes or {}
     values = [
-        [symbol, *(row.get(field, "") for field in OHLCV_FIELDS), adj_closes.get(row["date"]), now]
-        for row in rows
-        if row.get("date")
+        [symbol, *(bar[field] for field in OHLCV_FIELDS), price_value(adj_closes.get(bar["date"]), "adj_close", required=False), now]
+        for bar in map(normalize_ohlcv_row, rows)
     ]
+    db_path = ensure_db_schema(data_dir)
     con = _connect_db(data_dir)
     try:
         con.begin()
@@ -352,16 +436,16 @@ def load_closes(data_dir: Path, symbol: str) -> dict[str, float]:
     return {str(day): close for day, close in rows if close is not None}
 
 
-def indicator_values(symbol: str, rows: list[dict[str, str]], updated_at: str) -> list[list[str]]:
-    """Convert indicator rows into value lists ordered like INDICATOR_COLUMNS."""
+def indicator_values(symbol: str, rows: list[dict[str, Any]], updated_at: str) -> list[list[Any]]:
+    """Convert indicator rows into value lists ordered like INDICATOR_COLUMNS ("" or None is NULL)."""
     return [
-        [symbol, *(row.get(field, "") for field in OHLCV_FIELDS), *(row.get(field, "") for field in INDICATOR_FIELDS), updated_at]
+        [symbol, row["date"], *(None if row.get(field) in (None, "") else row[field] for field in INDICATOR_FIELDS), updated_at]
         for row in rows
         if row.get("date")
     ]
 
 
-def save_indicator_rows_db(data_dir: Path, symbol: str, rows: list[dict[str, str]]) -> str:
+def save_indicator_rows_db(data_dir: Path, symbol: str, rows: list[dict[str, Any]]) -> str:
     values = indicator_values(symbol, rows, utc_now_iso())
     return _upsert(data_dir, "indicators", INDICATOR_COLUMNS, ["symbol", "date"], values)
 

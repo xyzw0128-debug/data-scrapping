@@ -20,7 +20,7 @@ from urllib.request import Request, urlopen
 from src.env import load_project_env
 from src.lock import LockHeldError, lock_held_exit, pipeline_lock
 from src.state import load_state, save_state, utc_now_iso
-from src.storage import ensure_data_dirs, save_raw_latest, upsert_macro_db, upsert_series_meta
+from src.storage import ensure_data_dirs, ensure_db_schema, save_raw_latest, upsert_macro_db, upsert_series_meta
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -133,6 +133,8 @@ def collect_series(data_dir: Path, series_id: str, api_key: str, dry_run: bool) 
 
 def run(args: argparse.Namespace) -> dict:
     ensure_data_dirs(args.data_dir)
+    if not args.dry_run:
+        ensure_db_schema(args.data_dir)  # fail once on an unconverted schema, not per series
     series_ids = args.series if args.series else load_series(args.series_file)
     if args.limit is not None:
         series_ids = series_ids[: args.limit]

@@ -35,6 +35,8 @@ args=(
   --exclude "state/pipeline.lock"
   --exclude "logs/collector.log"
   --exclude "db/.*.tmp"
+  --exclude "db/.*.tmp/**"
+  --exclude "db/market.db.bak-*"
 )
 
 if [[ "$RCLONE_DRY_RUN" == "1" ]]; then

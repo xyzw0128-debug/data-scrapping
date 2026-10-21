@@ -45,6 +45,7 @@ STAGE_NAMES = {
     "src.finnhub_news":    "뉴스(Finnhub)",
     "src.summary":         "요약",
     "src.validate_duckdb": "DuckDB 검증",
+    "src.rebuild":         "DB 재구성",
 }
 NEWS_STAGE = STAGE_NAMES["src.finnhub_news"]
 

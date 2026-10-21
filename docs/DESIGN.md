@@ -40,7 +40,8 @@
 | 6 | 기술지표 | 바뀐 종목만 |
 | 7 | 뉴스 | 핵심 종목 먼저 |
 | 8 | 요약, 검증 | |
-| 9 | 스냅숏(full) | |
+| 9 | DB 재구성 (`src.rebuild --if-needed`) | `market.db`가 마지막 재구성 직후 크기의 2배를 넘을 때만 |
+| 10 | 스냅숏(full) | |
 
 - 단계가 실패해도 다음 단계를 계속하고 마지막에 실패 단계를 보고합니다.
 - 실행 전체를 `data/state/pipeline.lock`(flock) 하나로 직렬화합니다.
@@ -98,6 +99,7 @@
 
 - 종목 통째 교체: 한 트랜잭션에서 `ohlcv` 종목 행 삭제 → 새 행 삽입 → `indicators` 종목 행 삭제 → (핵심) 분할 이벤트 교체. 5000행(약 20년)보다 오래된 행은 사라집니다.
 - 기준 거래일보다 새로운 봉은 저장하지 않습니다.
+- 값 정규화(스키마 버전 4): 저장 전에 Python에서 봉을 검사합니다. 날짜는 `YYYY-MM-DD` 달력 날짜, open/high/low/close는 유한한 실수(빠지면 오류), volume은 0 이상의 정수(`"12345"`, `12345.0`은 허용, `1.5`는 오류, 빈 값은 NULL, 0은 0으로 보존), `adj_close`는 유한한 실수 또는 NULL입니다. 응답에 이상 값이 하나라도 있으면 그 종목만 실패(`ValueError`)로 처리해 기존 실패·재시도 흐름을 타고, 저장된 행은 바뀌지 않습니다. NDJSON에는 JSON 숫자로 쓰고 `read_json`이 테이블 타입으로 읽으므로, 정규화를 빠져나간 `""`·`"abc"`·잘못된 날짜도 DB에 들어가지 않고 오류가 납니다.
 - `delisted` 종목은 교체하지 않으므로 행이 보존됩니다.
 - dry-run은 `state.json`, `finnhub_news.json`, DB에 아무것도 쓰지 않습니다.
 - 원본 응답은 매일 5000행 전체를 다시 받으므로 응답마다 새 파일을 만들면 하루 1GB가 넘게 쌓입니다. 그래서 `data/raw/twelve_data/{splits,all,none}/<symbol>.json.gz`처럼 종목·조정 방식별 최신 1개만 gzip으로 덮어씁니다(약 0.6GB에서 멈춤). FRED, Finnhub도 같은 방식입니다. 2026-10-20 이전의 타임스탬프 파일(약 1.9GB)은 그대로 둡니다.
@@ -130,9 +132,12 @@
 | `prices_daily` (뷰) | symbol, date, open, high, low, close, adj_close, volume, dividends, splits — stockpred `STD_COLS`와 같은 이름·의미 |
 | `corporate_actions` | symbol, date, type(`split`), value, source, updated_at |
 | `symbol_status` | symbol, yahoo_symbol, group_name, active, delisted_at, last_bar_date, last_success_at, core_session, splits_complete |
-| `collection_runs` | run_id, phase, started_at, finished_at, session_date, status, core_expected, core_ok, missing_symbols, fred_expected, fred_ok, missing_series, note, splits_ok, missing_splits, universe_issue (스키마 버전 3) |
+| `collection_runs` | run_id, phase, started_at, finished_at, session_date, status, core_expected, core_ok, missing_symbols, fred_expected, fred_ok, missing_series, note, splits_ok, missing_splits, universe_issue (splits_ok 이후 3개는 스키마 버전 3에서 추가) |
 | `series_meta` | series_id, title, frequency, units, release, license_note, personal_use_only, updated_at |
-| `ohlcv`, `macro`, `news`, `indicators` | 기존 테이블. `ohlcv.adj_close`, `macro.first_seen_at` 추가 |
+| `ohlcv` | symbol, date `DATE`, open/high/low/close `DOUBLE`, volume `BIGINT`, updated_at `VARCHAR`, adj_close `DOUBLE` (스키마 버전 4). PK (symbol, date) |
+| `indicators` | symbol, date `DATE`, sma_20, sma_50, sma_200, rsi_14, macd_12_26, macd_signal_9, macd_hist `DOUBLE`(소수 6자리 반올림, 계산 전 구간은 NULL), updated_at `VARCHAR` (스키마 버전 4, OHLCV 중복 열 없음). PK (symbol, date) |
+| `macro`, `news` | `VARCHAR` 그대로. 타입이 필요하면 `macro_typed`, `news_typed` 뷰 |
+| `ohlcv_typed`, `indicators_typed` (뷰) | 스키마 버전 3과 같은 열·타입(volume `DOUBLE`) |
 
 ### `prices_daily` 컬럼 의미
 
@@ -143,9 +148,22 @@
 | splits | 분할일에만 비율, 그 외 0 |
 | dividends | 0 (무료 키로 받을 수 없음. stockpred 패널 계산은 이 컬럼을 쓰지 않음) |
 
+- 타입: date `DATE`, open/high/low/close/adj_close/volume `DOUBLE`, dividends `DECIMAL(2,1)`, splits `DOUBLE`. 스키마 버전 4에서도 같습니다(volume은 `BIGINT`로 저장하고 뷰에서 `CAST(volume AS DOUBLE)`).
+
 - Yahoo 캐시와 대조(2026-10-20, NVDA·BRK.B·SPY 5000행): close 일치(오차 5e-8 이하), volume 99% 구간 일치, 최근 2년 배당 조정계수 차이 0.007% 이하.
 - 알려진 차이: Twelve Data `adjust=all`에는 2012~2013년 일부 배당(NVDA 첫 배당 3회, SPY 2012-09-21)이 빠져 있어 그 날짜를 지나는 수익률이 배당만큼(약 0.5%) 다릅니다. 그래서 어댑터 검증은 값 수준이 아니라 날짜별 조정계수 변화(`(adj/close)_t / (adj/close)_{t-1}`)를 비교하고, 허용 오차는 close 일치, 최근 2년 조정계수 0.01%, volume 1%로 둡니다.
 - 대조 중 stockpred Yahoo 캐시의 2026-10-13 NVDA 종가가 장중 값(224.75, 확정 종가 228.52)으로 저장돼 있던 것을 발견했습니다. 스냅숏은 기준 거래일 이후 봉을 저장하지 않으므로 이런 값이 들어가지 않습니다.
+
+### 스키마 버전 4와 재구성 (`src.rebuild`)
+
+- 스키마 버전 4(2026-10-21): `ohlcv`·`indicators`의 날짜·숫자를 `VARCHAR` 대신 `DATE`/`DOUBLE`/`BIGINT`로 저장합니다. 문자열 PK 인덱스가 줄어 파일이 절반이 됩니다(운영 사본 리허설 2,273MB → 1,118MB). 뷰의 이름·열·타입은 그대로입니다.
+- `ensure_db_schema`는 빈 파일이면 버전 4로 만들고, 다른 버전 파일은 고치지 않고 `SchemaVersionError`(변환 명령 안내)로 멈춥니다. 제자리 마이그레이션은 파일을 오히려 키우기 때문입니다(복사본 시험 3.03GB). `src.main`·`src.fred`·`src.finnhub_news`는 시작할 때 확인하므로 API를 부르기 전에 멈춥니다.
+- 변환(배포 때 1회): `python -m src.rebuild --to-v4`. 비어 있지 않은데 변환되지 않는 값(날짜가 아닌 값, 유한하지 않은 실수, 정수가 아니거나 음수인 거래량)이 하나라도 있으면 아무것도 바꾸지 않고 멈춥니다. `""`는 NULL이 됩니다.
+- 재구성 절차(파이프라인 잠금 안): 원본 `CHECKPOINT` → 연결 닫기 → `market.db.wal`이 남아 있으면 중단 → 원본을 `READ_ONLY`로 `ATTACH` → 같은 디렉터리 임시 파일(`.market.db.rebuild.tmp`)에 새 DB 생성(변환은 `COPY FROM DATABASE ... (SCHEMA)` 뒤 `ohlcv`·`indicators`를 PK 포함 DDL로 다시 만들고 `NULLIF(col, '')` + `CAST`로 복사, 정기 재구성은 `COPY FROM DATABASE`) → 닫고 `READ_ONLY`로 다시 열어 원본과 비교(테이블 목록·행 수·제약 조건(PK)·버전 4 열 구성·뷰 열과 타입·모든 테이블과 뷰의 행 해시 합) → 임시 WAL 없음 확인 → 원본을 하드링크로 백업(`market.db.bak-<UTC 날짜>`, 같은 날 두 번째는 시각까지) → `os.replace`. 어느 단계에서 실패해도 임시 파일만 지우고 원본은 그대로 둡니다. 원본을 먼저 옮기지 않습니다.
+- 모든 연결에 `memory_limit`(변환 3GB, 정기 재구성 2GB), `threads`(4), `temp_directory`를 지정합니다.
+- 정기 재구성: 매일 종목을 통째로 교체하면 지운 행의 공간이 파일에 남고 `VACUUM`으로는 회수되지 않습니다. `run_daily.sh`는 전체 스냅숏 직전에 `src.rebuild --if-needed`를 돌려 `market.db`가 마지막 재구성 직후 크기(`data/state/db_maintenance.json`의 `baseline_bytes`)의 2배(`DB_REBUILD_GROWTH_FACTOR`)를 넘을 때만 재구성합니다. 기준이 없으면 현재 크기를 기준으로 기록만 합니다. 실패해도 다음 단계를 계속하고, dry-run은 판정만 합니다. 스냅숏은 그대로 파일 복사입니다.
+- 백업 파일은 자동으로 지우지 않습니다(rclone 백업 대상에서도 제외). 확인한 뒤 손으로 지웁니다.
+- 리허설(2026-10-21, 운영 스냅숏 사본, NVMe, `systemd-run MemoryMax=5G`): 변환 23.1초(검증 5.0초)·최대 RSS 2.2GB, `prices_daily` 등 뷰 5개 체크섬·NVDA/AAPL 분할 이벤트 동일, 재계산한 지표 241만 행 옛 값과 차이 0. 핵심 526종목 교체 2회 1,118 → 1,174 → 1,172MB, 지표 재계산 뒤 1,315MB. 정기 재구성 16.3초·최대 RSS 2.3GB로 1,315 → 1,113MB. 재구성 뒤 하루 주기(핵심 526종목 교체 + 지표 재계산)를 3번 재현하면 1,113 → 1,234 → 1,300 → 1,383MB(주기당 약 70~120MB, 순환·뉴스 제외)라 2배 기준(2,226MB)에는 대략 2~3주 뒤 닿습니다. 재현 사본의 `src.validate_duckdb` 이슈 0건.
 
 ## 6. 뉴스 (Finnhub)
 

@@ -87,6 +87,18 @@
 - [x] 일일 요약에 `market.db`·스냅숏 파일 크기 기록(`files.db_files`, Discord `db_mb`·`snapshot_mb`). 매일 종목을 통째로 교체하면 지운 행의 공간이 회수되지 않아 파일이 커지는지 관측하기 위함. 운영 DB 복사본 시험(2026-10-21): 실제 저장 경로로 핵심 526종목 교체를 이틀 재현하면 2,273MB → 2,504MB → 2,581MB, `VACUUM`은 효과 없음, 새 파일로 재구성하면 원래 크기로 돌아옴
 - [x] 스키마 v4(DATE·숫자 열) 대비, v3(VARCHAR)에서는 결과 동일: `load_closes` 키를 ISO 문자열로 고정(DATE 키면 분할 감지·분할 이벤트 계산이 조용히 빈 결과를 내고 기존 분할 기록을 지움), `_ohlcv_dict`는 NULL만 빈 문자열로(거래량 0 보존), DuckDB 검증 리포트의 날짜 값 직렬화(저장·출력)
 
+## 2026-10-21 효율 개선 2단계: 스키마 v4·재구성 (`docs/DESIGN.md` 5절)
+- [x] DuckDB 스키마 버전 4: `ohlcv`는 date `DATE`, open/high/low/close/adj_close `DOUBLE`, volume `BIGINT`(updated_at은 `find_stale_symbols`의 문자열 비교 때문에 `VARCHAR`, 열 순서는 버전 3과 같음). `indicators`는 중복 OHLCV 5개 열을 없애고 date `DATE`, 지표 7개 `DOUBLE`(소수 6자리 반올림, 계산 전 구간 NULL). `macro`·`news`는 그대로. 뷰 `prices_daily`·`ohlcv_typed`·`indicators_typed`·`macro_typed`·`news_typed`의 이름·열·타입 유지(volume은 뷰에서 `CAST(volume AS DOUBLE)`)
+- [x] 쓰기 정규화: Twelve Data 봉을 Python에서 검사(날짜 `YYYY-MM-DD`, 가격 유한 실수, 거래량 0 이상 정수, 거래량·`adj_close`만 빈 값 → NULL, 거래량 0 보존). 이상 값은 그 종목만 실패(`ValueError`, 기존 실패·재시도 흐름)하고 저장된 행은 그대로. NDJSON에 JSON 숫자로 쓰고 `read_json`을 테이블 타입으로 읽음. Alpha Vantage 저장도 같은 정규화를 거침. 운영 원본 응답 1,401개(`splits` 527·`all` 526·`none` 348)가 모두 통과
+- [x] `src.rebuild`: 공용 재구성 CLI(파이프라인 잠금, JSON 출력). 원본 `CHECKPOINT` → 연결 닫기 → WAL 남으면 중단 → 원본 `READ_ONLY` `ATTACH` → 같은 디렉터리 임시 파일에 생성 → `READ_ONLY`로 다시 열어 검증(테이블·행 수·제약 조건·버전 4 열 구성·뷰 열과 타입·행 해시 합) → 임시 WAL 없음 확인 → 하드링크 백업(`market.db.bak-<UTC 날짜>`) → `os.replace`. 실패하면 임시 파일만 지우고 원본은 그대로. 모든 연결에 `memory_limit`(변환 3GB, 정기 2GB)·`threads`·`temp_directory` 지정. 재구성 직후 크기를 `data/state/db_maintenance.json`에 기록
+- [x] `--to-v4`: 버전 3 → 4 변환(`COPY FROM DATABASE ... (SCHEMA)` 뒤 `ohlcv`·`indicators`를 PK 포함 DDL로 다시 만들고, 비어 있지 않은데 변환되지 않는 값이 0건인지 검사한 뒤 `NULLIF(col, '')` + `CAST`로 복사). DuckDB `CAST('1.5' AS BIGINT)`는 오류 없이 2가 되므로 거래량은 정수 여부까지 검사
+- [x] 정기 재구성: `run_daily.sh`가 전체 스냅숏 직전에 `src.rebuild --if-needed` 실행(`RUN_DB_REBUILD`, `DB_REBUILD_GROWTH_FACTOR`=2). 마지막 재구성 직후 크기의 2배를 넘을 때만 재구성, 기준이 없으면 현재 크기를 기준으로 기록만. 실패해도 다음 단계 계속, dry-run은 판정만. 스냅숏은 파일 복사 그대로. `progress.py` 단계 이름 "DB 재구성", rclone 백업에서 재구성 임시 파일·백업 제외
+- [x] 배포 보호: 버전 4 코드가 다른 버전 DB를 만나면 `ensure_db_schema`가 자동 변환 없이 `SchemaVersionError`(변환 명령 안내)를 냄. `src.main`·`src.fred`·`src.finnhub_news`는 시작할 때 확인해 API 호출 전에 멈춤
+- [x] 테스트: v3 → v4 변환(뷰 결과 동일, 거래량 0 보존, `""` → NULL, 분할 이벤트), 변환 불가 값·검증 실패·`os.replace` 실패 시 원본 보존과 임시 파일 정리, 하드링크 백업(같은 inode), 정기 재구성 판정, 쓰기 정규화, 이상 값 종목만 실패, v3 DB에서 수집 시작 전 중단
+- [x] 리허설(운영 스냅숏 사본, NVMe, `systemd-run MemoryMax=5G`): 변환 2,273MB → 1,118MB, 23.1초(검증 5.0초), 최대 RSS 2.2GB. 독립 스크립트로 비교한 뷰 5개 행 수·열 타입·체크섬, NVDA(2007-09-11 1.5, 2021-07-20 4.0, 2024-06-10 10.0)·AAPL(2014-06-09 7.0, 2020-08-31 4.0) 분할 이벤트(저장값, `load_closes` + `split_events` 재계산, `prices_daily.splits`)가 변환 전과 같음. 운영 원본으로 핵심 526종목 교체 2회 실패 0건(1,174 → 1,172MB), 지표 재계산 526종목 36초·옛 값과 차이 0행, 재현 후에도 `prices_daily` 행 단위 동일. 정기 재구성 1,315MB → 1,113MB, 16.3초, 최대 RSS 2.3GB. 재구성 뒤 하루 주기(핵심 526종목 교체 + 지표 재계산)를 3번 재현하면 1,113 → 1,234 → 1,300 → 1,383MB(주기당 약 70~120MB, 순환·뉴스 제외)라 2배 기준(2,226MB)에는 대략 2~3주 뒤 닿습니다. 재현 사본의 `src.validate_duckdb` 이슈 0건
+- [ ] 운영 `market.db` 버전 4 변환과 `main` 반영(사용자 승인 후, 같은 시간대에 이어서. 절차는 `docs/DEPLOYMENT.md` "스키마 버전 4 변환")
+- [ ] 변환 백업(`market.db.bak-<날짜>`) 일주일 뒤 확인 후 삭제
+
 ## 이전 다음 작업
 - [x] run_daily.sh에 DuckDB 검증 단계 포함
 - [x] Pi 배포 스크립트(install_pi.sh) 및 배포 가이드(DEPLOYMENT.md) 추가 → 2026-10-20 `install_local.sh`로 교체
@@ -99,7 +111,7 @@
 - [ ] rclone 백업 설정 후 백업 타이머 켜기
 - [ ] 상장폐지 종목 데이터 확보 검토(현재 심볼 목록 기준이라 생존 편향 존재; 2026-10-20부터는 상장폐지 종목 행을 보존)
 - [ ] FRED 최초 발표값(ALFRED vintage) 기반 거시지표 시점 정렬 검토(`first_seen_at`은 2026-10-20 이후 관측값부터 기록)
-- [ ] 효율 개선 2단계: DuckDB 스키마 v4(`ohlcv` DATE/DOUBLE/BIGINT, `indicators`의 중복 OHLCV 열 제거, 뷰 이름·타입 유지)와 공용 재구성 도구(잠금 안에서 `CHECKPOINT` → 연결 종료 → 같은 디렉터리 임시 파일에 재구성 → 검증 → 하드링크 백업 → `os.replace`, `memory_limit` 명시). 쓰기는 Python에서 정규화(날짜 ISO, 유한 실수, 정수 거래량, 이상 값은 그 종목만 실패). 정기 재구성은 파일이 재구성 직후 크기의 2배를 넘을 때 전체 스냅숏 직전에 실행. 스냅숏은 파일 복사 유지. 복사본 시험: 같은 조건 재구성 기준 2,120MB → 1,137MB, 변환 16.6초(memory_limit 2GB), 뷰 결과 체크섬 동일
 - [ ] 효율 개선 3단계: 2026-10-20 이전 raw 타임스탬프 파일(5,312개, 1.946GB)을 `docs/DESIGN.md` 보관 규칙 수정 후 tar.gz로 압축 보관(약 0.21GB). 원본 삭제는 대조 후 별도 확인
 - [ ] 바뀐 행만 upsert하는 쓰기 최적화 검토(2단계 이후 쌓인 파일 크기 기록을 보고 판단, 분할 기준 변경 시 전체 갱신·지표 재계산 필요)
+- [ ] 정기 재구성 백업 정리 규칙: 재구성마다 `market.db.bak-*`가 하나씩 남고 자동으로 지우지 않음. `db_maintenance.json`의 `history`와 디스크 사용량을 보고 보관 개수를 정함
 - 보류: Twelve Data 키별 병렬 수집 레인(총 크레딧은 그대로이고 단축되는 건 핵심 단계뿐, 약관 2.3(h)·(i) 위험). 시간 단축이 필요하고 Twelve Data가 키별 독립 한도 사용을 허용한다고 확인되면 재검토

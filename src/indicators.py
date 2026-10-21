@@ -12,7 +12,6 @@ from src.lock import LockHeldError, lock_held_exit, pipeline_lock
 from src.state import utc_now_iso
 from src.storage import (
     INDICATOR_COLUMNS,
-    OHLCV_FIELDS,
     bulk_upsert,
     connect_db,
     ensure_data_dirs,
@@ -22,17 +21,6 @@ from src.storage import (
     load_ohlcv_rows_for_symbols,
     save_indicator_rows_db,
 )
-
-
-INDICATOR_FIELDS = [
-    "sma_20",
-    "sma_50",
-    "sma_200",
-    "rsi_14",
-    "macd_12_26",
-    "macd_signal_9",
-    "macd_hist",
-]
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,10 +47,11 @@ def _parse_float(value: str) -> float | None:
         return None
 
 
-def _format_number(value: float | None) -> str:
+def _round_value(value: float | None) -> float | None:
+    """Indicator value stored as DOUBLE, rounded to 6 decimals; None (warm-up rows) stays NULL."""
     if value is None:
-        return ""
-    return f"{value:.6f}".rstrip("0").rstrip(".")
+        return None
+    return round(value, 6)
 
 
 
@@ -166,8 +155,8 @@ def calculate_macd(
     return macd, signal, hist
 
 
-def add_indicators(rows: list[dict[str, str]]) -> list[dict[str, str]]:
-    """Return OHLCV rows with local technical indicator columns appended."""
+def add_indicators(rows: list[dict[str, str]]) -> list[dict[str, object]]:
+    """Return one {"date", indicator columns...} row per OHLCV row (None where undefined)."""
     closes = [_parse_float(row.get("close", "")) for row in rows]
     sma_20 = calculate_sma(closes, 20)
     sma_50 = calculate_sma(closes, 50)
@@ -175,21 +164,20 @@ def add_indicators(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     rsi_14 = calculate_rsi(closes, 14)
     macd, macd_signal, macd_hist = calculate_macd(closes)
 
-    output: list[dict[str, str]] = []
+    output: list[dict[str, object]] = []
     for index, row in enumerate(rows):
-        enriched = {field: row.get(field, "") for field in OHLCV_FIELDS}
-        enriched.update(
+        output.append(
             {
-                "sma_20": _format_number(sma_20[index]),
-                "sma_50": _format_number(sma_50[index]),
-                "sma_200": _format_number(sma_200[index]),
-                "rsi_14": _format_number(rsi_14[index]),
-                "macd_12_26": _format_number(macd[index]),
-                "macd_signal_9": _format_number(macd_signal[index]),
-                "macd_hist": _format_number(macd_hist[index]),
+                "date": row.get("date", ""),
+                "sma_20": _round_value(sma_20[index]),
+                "sma_50": _round_value(sma_50[index]),
+                "sma_200": _round_value(sma_200[index]),
+                "rsi_14": _round_value(rsi_14[index]),
+                "macd_12_26": _round_value(macd[index]),
+                "macd_signal_9": _round_value(macd_signal[index]),
+                "macd_hist": _round_value(macd_hist[index]),
             }
         )
-        output.append(enriched)
     return output
 
 
@@ -226,7 +214,7 @@ def calculate_batches(con, data_dir: Path, symbols: list[str], batch_size: int) 
         batch = symbols[start : start + max(1, batch_size)]
         rows_by_symbol = load_ohlcv_rows_for_symbols(con, batch)
         updated_at = utc_now_iso()
-        values: list[list[str]] = []
+        values: list[list[object]] = []
         for symbol in batch:
             rows = rows_by_symbol.get(symbol, [])
             values.extend(indicator_values(symbol, add_indicators(rows), updated_at))

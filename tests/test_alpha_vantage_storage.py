@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -62,7 +63,7 @@ class AlphaVantageStorageTest(unittest.TestCase):
             finally:
                 con.close()
 
-        self.assertEqual(rows, [("AAPL", "2026-05-13", "10.00", "11.00", "9.50", "10.50", "12345")])
+        self.assertEqual(rows, [("AAPL", date(2026, 5, 13), 10.0, 11.0, 9.5, 10.5, 12345)])
 
     def test_alpha_vantage_imports_existing_duckdb_upsert(self) -> None:
         self.assertIs(alpha_vantage.upsert_ohlcv_db, upsert_ohlcv_db)

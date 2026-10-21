@@ -368,8 +368,28 @@ class FredTest(unittest.TestCase):
 
 
 @unittest.skipIf(not HAS_DUCKDB, "duckdb dependency is not installed")
-class MigrationTest(unittest.TestCase):
-    def test_version_1_database_is_migrated(self) -> None:
+class SchemaVersionTest(unittest.TestCase):
+    def test_new_database_is_created_at_version_4_with_the_same_view_columns(self) -> None:
+        from src import storage
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            storage.ensure_db_schema(data_dir)
+            con = storage.connect_db(data_dir, read_only=True)
+            try:
+                version = storage.schema_version(con)
+                prices = [(row[0], row[1]) for row in con.execute("DESCRIBE prices_daily").fetchall()]
+                indicator_columns = [row[0] for row in con.execute("DESCRIBE indicators").fetchall()]
+            finally:
+                con.close()
+        self.assertEqual(version, 4)
+        self.assertEqual(prices, [
+            ("symbol", "VARCHAR"), ("date", "DATE"), ("open", "DOUBLE"), ("high", "DOUBLE"), ("low", "DOUBLE"), ("close", "DOUBLE"),
+            ("adj_close", "DOUBLE"), ("volume", "DOUBLE"), ("dividends", "DECIMAL(2,1)"), ("splits", "DOUBLE"),
+        ], "stockpred contract: same names and types as schema version 3")
+        self.assertEqual(indicator_columns, ["symbol", "date", *storage.INDICATOR_FIELDS, "updated_at"])
+
+    def test_older_database_is_refused_with_the_conversion_command(self) -> None:
         import duckdb  # type: ignore
 
         from src import storage
@@ -378,24 +398,21 @@ class MigrationTest(unittest.TestCase):
             data_dir = Path(tmp)
             (data_dir / "db").mkdir()
             con = duckdb.connect(str(data_dir / "db" / "market.db"))
-            for sql in storage.BASE_TABLE_SQL[:4]:
-                con.execute(sql)
-            con.execute("INSERT INTO ohlcv VALUES ('AAA', '2026-01-02', '1', '1', '1', '1', '1', 'old')")
-            con.execute("CREATE VIEW ohlcv_typed AS SELECT symbol FROM ohlcv")
+            con.execute("CREATE TABLE ohlcv (symbol VARCHAR NOT NULL, date VARCHAR NOT NULL, close VARCHAR, PRIMARY KEY(symbol, date))")
+            con.execute("CREATE TABLE schema_meta (key VARCHAR PRIMARY KEY, value VARCHAR)")
+            con.execute("INSERT INTO schema_meta VALUES ('version', '3')")
             con.close()
-            storage.ensure_db_schema(data_dir)
+            with self.assertRaisesRegex(storage.SchemaVersionError, r"schema version 3.*src\.rebuild --to-v4"):
+                storage.ensure_db_schema(data_dir)
+            with self.assertRaises(storage.SchemaVersionError):
+                storage.replace_symbol_prices(data_dir, "AAA", [{"date": "2026-01-02", "open": "1", "high": "1", "low": "1", "close": "1", "volume": "1"}])
             con = duckdb.connect(str(data_dir / "db" / "market.db"), read_only=True)
             try:
-                version = con.execute("SELECT value FROM schema_meta WHERE key = 'version'").fetchone()[0]
-                run_columns = {row[0] for row in con.execute("DESCRIBE collection_runs").fetchall()}
-                typed = con.execute("SELECT symbol, adj_close FROM ohlcv_typed").fetchall()
-                prices = con.execute("SELECT symbol, splits FROM prices_daily").fetchall()
+                tables = {row[0] for row in con.execute("SELECT table_name FROM duckdb_tables()").fetchall()}
+                version = con.execute("SELECT value FROM schema_meta").fetchone()[0]
             finally:
                 con.close()
-        self.assertEqual(version, "3")
-        self.assertTrue({"splits_ok", "missing_splits", "universe_issue"} <= run_columns)
-        self.assertEqual(typed, [("AAA", None)], "old view is replaced with the adj_close version")
-        self.assertEqual(prices, [("AAA", 0.0)])
+        self.assertEqual((tables, version), ({"ohlcv", "schema_meta"}, "3"), "nothing is migrated in place")
 
 
 if __name__ == "__main__":

@@ -27,7 +27,7 @@ from src.env import load_project_env
 from src.lock import LockHeldError, lock_held_exit, pipeline_lock
 from src.rate_limit import PerMinuteRateLimiter
 from src.state import load_state, save_state, utc_now_iso
-from src.storage import connect_db, ensure_data_dirs, get_db_path, save_raw_latest, upsert_news_db
+from src.storage import connect_db, ensure_data_dirs, ensure_db_schema, get_db_path, save_raw_latest, upsert_news_db
 from src.universe import Universe, load_universe
 
 
@@ -247,6 +247,8 @@ def collect_symbol_news(
 
 def run(args: argparse.Namespace) -> dict:
     ensure_data_dirs(args.data_dir)
+    if not args.dry_run:
+        ensure_db_schema(args.data_dir)  # fail once on an unconverted schema, not per symbol
     news_state = load_state(args.state).get("symbols", {}) if args.state.exists() else {}
     if args.dry_run:
         news_state = copy.deepcopy(news_state)

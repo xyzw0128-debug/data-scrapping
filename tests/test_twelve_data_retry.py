@@ -234,8 +234,8 @@ class CoreCollectionTest(unittest.TestCase):
                 con.close()
 
         self.assertEqual(result, {"rows": 4, "last_bar_date": "2024-06-11", "adj_ok": True, "split_basis_changed": False})
-        self.assertEqual(dates, ["2024-06-06", "2024-06-07", "2024-06-10", "2024-06-11"], "old 1999 row and unfinished bar are gone")
-        self.assertEqual(adj, str(adjusted_all["2024-06-07"]))
+        self.assertEqual([str(d) for d in dates], ["2024-06-06", "2024-06-07", "2024-06-10", "2024-06-11"], "old 1999 row and unfinished bar are gone")
+        self.assertEqual(adj, adjusted_all["2024-06-07"])
         self.assertEqual(events, 1)
         self.assertEqual([(str(d), s) for d, _, _, s in prices], [("2024-06-06", 0.0), ("2024-06-07", 0.0), ("2024-06-10", 10.0), ("2024-06-11", 0.0)])
 
@@ -259,7 +259,37 @@ class CoreCollectionTest(unittest.TestCase):
                 rows = con.execute("SELECT date, close FROM ohlcv WHERE symbol = 'AAA'").fetchall()
             finally:
                 con.close()
-        self.assertEqual(rows, [("2024-06-10", "9")])
+        self.assertEqual([(str(d), close) for d, close in rows], [("2024-06-10", 9.0)])
+
+    def test_malformed_bar_fails_only_that_symbol_and_keeps_its_rows(self) -> None:
+        import duckdb  # type: ignore
+
+        def http_get(url):
+            query = parse_qs(urlparse(url).query)
+            bars = _bars({"2024-06-10": 10.0, "2024-06-11": 10.5})
+            if query["symbol"][0] == "AAA" and query["adjust"][0] == "all":
+                bars[0]["volume"] = "1.5"  # newest bar: not a whole number
+            return 200, {"status": "ok", "values": bars}
+
+        client, state, _ = _client(http_get, cap=20)
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            main.replace_symbol_prices(data_dir, "AAA", [{"date": "2024-06-07", "open": "9", "high": "9", "low": "9", "close": "9", "volume": "0"}])
+            args = argparse.Namespace(dry_run=False, force=False, data_dir=data_dir, state=data_dir / "state" / "state.json")
+            summary = {"started_at": "2024-06-12T00:00:00Z", "run_id": "test", "processed": 0, "failed": 0, "skipped_rate_limit": 0, "symbols": []}
+            run = main.Run(args, state, summary, logging.getLogger("test"), client.cap)
+            main.run_core(run, client, ["AAA", "BBB"], "2024-06-11")
+            con = duckdb.connect(str(data_dir / "db" / "market.db"), read_only=True)
+            try:
+                rows = con.execute("SELECT symbol, CAST(date AS VARCHAR), volume FROM ohlcv ORDER BY symbol, date").fetchall()
+            finally:
+                con.close()
+        self.assertEqual({k: summary["core"][k] for k in ("done", "failed")}, {"done": 1, "failed": 1})
+        entry = state["symbols"]["AAA"]["twelve_data"]
+        self.assertEqual(entry["status"], "failed")
+        self.assertIn("invalid volume '1.5' on 2024-06-11", entry["error"])
+        self.assertIsNotNone(entry["next_retry_date"])
+        self.assertEqual(rows, [("AAA", "2024-06-07", 0), ("BBB", "2024-06-10", 100), ("BBB", "2024-06-11", 100)], "AAA keeps its old row, zero volume included")
 
     def test_lost_response_fails_one_symbol_and_core_continues(self) -> None:
         def http_get(url):

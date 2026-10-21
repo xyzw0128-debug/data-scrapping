@@ -37,6 +37,10 @@ RUN_FINNHUB="${RUN_FINNHUB:-1}"
 RUN_SUMMARY="${RUN_SUMMARY:-1}"
 RUN_DUCKDB_VALIDATE="${RUN_DUCKDB_VALIDATE:-1}"
 RUN_SNAPSHOT="${RUN_SNAPSHOT:-1}"
+# Rebuild market.db into a new file when it grew past DB_REBUILD_GROWTH_FACTOR x its size
+# right after the last rebuild (deleted rows of daily full replacement are never reclaimed).
+RUN_DB_REBUILD="${RUN_DB_REBUILD:-1}"
+DB_REBUILD_GROWTH_FACTOR="${DB_REBUILD_GROWTH_FACTOR:-2}"
 SEND_DISCORD="${SEND_DISCORD:-0}"
 DISCORD_STATUS_REFRESH_SEC="${DISCORD_STATUS_REFRESH_SEC:-15}"
 RUN_BACKUP="${RUN_BACKUP:-0}"
@@ -188,6 +192,13 @@ if [[ "$RUN_DUCKDB_VALIDATE" == "1" ]]; then
     update_discord_status --status "검증 중" --current-symbol "validate_duckdb"
     run_stage validate_duckdb "$PYTHON_BIN" -m src.validate_duckdb
   fi
+fi
+
+if [[ "$RUN_DB_REBUILD" == "1" ]]; then
+  # DRY_RUN=1 only reports the decision. A failed rebuild leaves market.db untouched.
+  log_step "Checking market.db size (rebuild above ${DB_REBUILD_GROWTH_FACTOR}x the size after the last rebuild)"
+  update_discord_status --status "DB 점검 중" --current-symbol "rebuild"
+  run_stage db_rebuild "$PYTHON_BIN" -m src.rebuild --if-needed --growth-factor "$DB_REBUILD_GROWTH_FACTOR" "${maybe_dry_run_args[@]}"
 fi
 
 if [[ "$RUN_SNAPSHOT" == "1" ]]; then

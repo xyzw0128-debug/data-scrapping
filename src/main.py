@@ -32,6 +32,7 @@ from src.scheduling import choose_rotation_symbols, provider_entry, record_failu
 from src.state import load_state, save_state, utc_now_iso, utc_today
 from src.storage import (
     ensure_data_dirs,
+    ensure_db_schema,
     load_closes,
     normalize_twelve_data_ohlcv,
     replace_split_events,
@@ -73,12 +74,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def bars_until(payload: dict, session: str) -> list[dict[str, str]]:
-    """Normalized daily bars dated on or before the latest finished session."""
+def bars_until(payload: dict, session: str) -> list[dict]:
+    """Validated daily bars dated on or before the latest finished session.
+
+    A malformed bar anywhere in the response raises ValueError, which fails only this symbol
+    (normal failure/retry bookkeeping) and leaves its stored rows untouched.
+    """
     return [row for row in normalize_twelve_data_ohlcv(payload) if row["date"] <= session]
 
 
-def _close_map(rows: list[dict[str, str]]) -> dict[str, float]:
+def _close_map(rows: list[dict]) -> dict[str, float]:
     closes: dict[str, float] = {}
     for row in rows:
         try:
@@ -284,6 +289,8 @@ def run_collection(args: argparse.Namespace, logger: logging.Logger) -> dict:
     ensure_data_dirs(args.data_dir)
     verify_writable(args.data_dir)
     verify_writable(args.data_dir / "state")
+    if not args.dry_run:
+        ensure_db_schema(args.data_dir)  # an unconverted schema stops the run before any paid call
 
     config = load_provider_config(args.providers, args.provider)
     if config.name != PROVIDER:

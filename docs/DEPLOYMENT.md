@@ -61,16 +61,32 @@ systemctl --user disable --now data-scrapping.timer # 자동 실행 끄기
 3. 점검: `RCLONE_DRY_RUN=1 scripts/rclone_backup.sh`
 4. 켜기: `ENABLE_BACKUP=1 scripts/install_local.sh` 또는 `systemctl --user enable --now data-scrapping-backup.timer`
 
-백업 스크립트는 단독으로 실행되면 파이프라인 잠금을 기다렸다가(최대 6시간) 복사하므로 쓰는 도중의 `market.db`를 올리지 않습니다. `run_daily.sh`의 `RUN_BACKUP=1`로 수집 직후에 돌릴 수도 있습니다.
+백업 스크립트는 단독으로 실행되면 파이프라인 잠금을 기다렸다가(최대 6시간) 복사하므로 쓰는 도중의 `market.db`를 올리지 않습니다. `run_daily.sh`의 `RUN_BACKUP=1`로 수집 직후에 돌릴 수도 있습니다. 재구성 임시 파일(`db/.*.tmp`)과 재구성 백업(`db/market.db.bak-*`)은 올리지 않습니다.
+
+## 스키마 버전 4 변환 (1회)
+
+스키마 버전 4 코드는 버전 3 `market.db`에 쓰지 않고 `SchemaVersionError`로 멈춥니다(수집 CLI는 API 호출 전에 확인). 그래서 코드 반영과 변환을 같은 시간대에 이어서 합니다.
+
+1. 수집이 돌지 않는지 확인합니다: `systemctl --user is-active data-scrapping.service`가 `inactive`, `.venv/bin/python scripts/progress.py --once`, 다음 타이머(평일 16:10 New York) 전에 끝낼 시간이 있는지.
+2. 운영 폴더에서 `git merge --ff-only <브랜치>`(안 되면 worktree에서 `main`을 병합하고 테스트를 다시 통과시킨 뒤).
+3. 점검: `.venv/bin/python -m src.rebuild --to-v4 --dry-run`(버전 3, 크기, 여유 공간).
+4. 변환: `.venv/bin/python -m src.rebuild --to-v4`. 운영 사본 리허설 기준 약 25초, 최대 RSS 약 2.2GB(`memory_limit` 3GB), 여유 공간은 원본 크기의 1.1배 이상 필요합니다. 출력 JSON의 `status`가 `converted`인지, `checks`의 행 수·뷰 체크섬을 확인합니다.
+5. 확인: `ohlcv`·`indicators` 행 수, `prices_daily` 행 수, NVDA 분할 이벤트(2007-09-11 1.5, 2021-07-20 4.0, 2024-06-10 10.0).
+6. 스냅숏 갱신: `.venv/bin/python -m src.snapshot --phase full`.
+7. `git push origin main`.
+
+변환 전 파일은 `data/db/market.db.bak-<UTC 날짜>`(하드링크)로 남습니다. 일주일쯤 운영을 확인한 뒤 지웁니다. 변환이 실패하면 임시 파일만 지워지고 `market.db`는 버전 3 그대로입니다. 그때는 다음 수집 전에 운영 폴더 `main`을 반영 전 커밋으로 되돌립니다(아직 push 전이고 작업 트리가 깨끗하면 `git reset --hard ORIG_HEAD`).
 
 ## 데이터 경로
 
 - 모든 CLI는 `--data-dir`로 데이터 경로를 바꿀 수 있습니다. `run_daily.sh`는 저장소의 `data/`를 씁니다.
-- 디스크 사용량: `market.db` 약 0.9GB, 스냅숏 같은 크기, 원본 응답(gzip, 종목별 최신 1개) 약 0.6GB.
+- 디스크 사용량: `market.db` 약 1.1GB(스키마 버전 4. 버전 3은 약 2.3GB), 스냅숏 같은 크기, 원본 응답(gzip, 종목별 최신 1개) 약 0.6GB. 재구성 백업(`market.db.bak-*`)은 자동으로 지우지 않습니다.
 
 ## 트러블슈팅
 
 - `{"status": "lock_held"}`(종료 코드 2): 다른 실행이 파이프라인 잠금(`data/state/pipeline.lock`)을 잡고 있습니다. 잠금은 프로세스가 끝나면 커널이 풀기 때문에 파일을 지울 필요가 없습니다. `.venv/bin/python scripts/progress.py --once`로 상태를 봅니다.
 - 다른 프로그램이 `market.db`를 열어 두면 수집기 쓰기가 실패합니다. 읽기는 `market_snapshot.db`로 합니다.
+- `SchemaVersionError: ... has schema version 3`: 스키마 버전 4 코드가 변환 전 DB를 만났습니다. 위의 "스키마 버전 4 변환"을 따릅니다.
+- `db_rebuild` 단계 실패: `market.db`는 바뀌지 않았습니다. `journalctl --user -u data-scrapping`에서 오류를 봅니다. 남은 `.market.db.rebuild.tmp`는 다음 재구성이 지웁니다.
 - API 키 오류: `.env`의 키 이름과 값을 확인한 뒤 `journalctl --user -u data-scrapping`과 `data/logs/collector.log`를 봅니다.
 - 의존성 오류: `scripts/install_local.sh`를 다시 실행합니다.

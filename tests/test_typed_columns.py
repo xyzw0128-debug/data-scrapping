@@ -1,6 +1,6 @@
-"""Readers give the same results whether DuckDB returns VARCHAR (schema v3) or DATE/numeric values.
+"""Readers work on schema v4's DATE/numeric values as they did on VARCHAR (schema v3).
 
-Schema v4 will store ohlcv dates as DATE and prices/volume as numbers. These readers must not
+Schema v4 stores ohlcv dates as DATE and prices/volume as numbers. These readers must not
 depend on string results: a DATE key never matches the provider's "YYYY-MM-DD" keys, and
 ``str(value or "")`` turns a numeric zero volume into "".
 """
@@ -20,16 +20,13 @@ from unittest.mock import patch
 
 from src.corporate_actions import split_basis_changed, split_events
 from src.lock import PIPELINE_LOCK_ENV
-from src.storage import _ohlcv_dict, connect_db, load_closes, load_ohlcv_rows_db, load_ohlcv_rows_for_symbols
-
-TYPED_OHLCV_SQL = """CREATE TABLE ohlcv (symbol VARCHAR NOT NULL, date DATE NOT NULL, open DOUBLE, high DOUBLE, low DOUBLE,
-    close DOUBLE, volume BIGINT, updated_at VARCHAR NOT NULL, adj_close DOUBLE, PRIMARY KEY(symbol, date))"""
+from src.storage import TABLE_SQL, _ohlcv_dict, connect_db, load_closes, load_ohlcv_rows_db, load_ohlcv_rows_for_symbols
 
 
 def _typed_db(data_dir: Path, rows: list[tuple]) -> None:
     con = connect_db(data_dir)
     try:
-        con.execute(TYPED_OHLCV_SQL)
+        con.execute(TABLE_SQL["ohlcv"])
         con.executemany("INSERT INTO ohlcv VALUES (?, ?, ?, ?, ?, ?, ?, '2026-10-21T00:00:00Z', NULL)", rows)
     finally:
         con.close()
