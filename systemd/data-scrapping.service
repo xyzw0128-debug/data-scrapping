@@ -1,10 +1,10 @@
+# systemd user unit; scripts/install_local.sh replaces @ROOT@ and installs it to ~/.config/systemd/user.
 [Unit]
-Description=Daily personal market data collector
-Wants=network-online.target
-After=network-online.target
+Description=Daily market data collector (data-scrapping)
 
 [Service]
 Type=oneshot
-WorkingDirectory=/workspace/data-scrapping
-EnvironmentFile=-/etc/data-scrapping.env
-ExecStart=/workspace/data-scrapping/scripts/run_daily.sh
+WorkingDirectory=@ROOT@
+# run_daily.sh loads @ROOT@/.env itself, so no EnvironmentFile is needed.
+ExecStart=@ROOT@/scripts/run_daily.sh
+Nice=10

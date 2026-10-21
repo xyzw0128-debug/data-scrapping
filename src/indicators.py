@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from src.config import load_symbols
+from src.lock import LockHeldError, lock_held_exit, pipeline_lock
 from src.state import utc_now_iso
 from src.storage import (
     INDICATOR_COLUMNS,
@@ -39,7 +40,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Calculate local indicators from OHLCV rows in DuckDB.")
-    parser.add_argument("--symbols", type=Path, default=ROOT / "config" / "symbols.txt")
+    parser.add_argument("--symbols", type=Path, default=None, help="Restrict to this symbol file (default: every symbol with OHLCV)")
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
     parser.add_argument("--symbol", action="append", help="Calculate only this symbol; can be used multiple times")
     parser.add_argument("--full", action="store_true", help="Recalculate every symbol instead of only symbols whose OHLCV changed")
@@ -241,16 +242,20 @@ def calculate_batches(con, data_dir: Path, symbols: list[str], batch_size: int) 
     return results
 
 
-def main() -> int:
-    args = parse_args()
+def run(args: argparse.Namespace) -> dict:
     ensure_data_dirs(args.data_dir)
     ensure_db_schema(args.data_dir)
-    symbols = args.symbol if args.symbol else load_symbols(args.symbols)
     mode = "selected" if args.symbol else "full" if args.full else "incremental"
 
     con = connect_db(args.data_dir)
     try:
         with_ohlcv = {row[0] for row in con.execute("SELECT DISTINCT symbol FROM ohlcv").fetchall()}
+        if args.symbol:
+            symbols = args.symbol
+        elif args.symbols is not None:
+            symbols = load_symbols(args.symbols)
+        else:
+            symbols = sorted(with_ohlcv)
         candidates = [symbol for symbol in symbols if symbol in with_ohlcv]
         targets = candidates if mode != "incremental" else find_stale_symbols(con, candidates)
         results = calculate_batches(con, args.data_dir, targets, args.batch_size)
@@ -265,7 +270,18 @@ def main() -> int:
         "rows": sum(int(item["rows"]) for item in results),
         "symbols": results,
     }
-    print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
+    return summary
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        with pipeline_lock(args.data_dir):
+            summary = run(args)
+    except LockHeldError as exc:
+        return lock_held_exit(exc)
+    printable = {k: v for k, v in summary.items() if k != "symbols"}
+    print(json.dumps(printable, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
 

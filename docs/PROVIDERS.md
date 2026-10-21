@@ -1,43 +1,43 @@
 # PROVIDERS
 
 ## Twelve Data
-- **역할**: 기본 일일 OHLCV 수집 provider (`src.main`) 및 NASDAQ 티커 목록 조회(`src.fetch_tickers`).
-- **알려진 한도(이 저장소 기본 설정)**: `daily_limit: 800`, `daily_reserve: 100`, `per_minute_limit: 8`, `max_symbols_per_run: 700`.
-- **실제 사용 목표**: 기본 수집 경로로 사용하되, 일일 한도를 다 쓰지 않고 reserve를 남겨 장기 안정 운영.
+- **역할**: 일봉 OHLCV 기본 수집(`src.main`), 종목 카탈로그(`src.universe`, `src.fetch_tickers`).
+- **무료(Basic) 한도**: 키당 분당 8크레딧, 하루 800크레딧(00:00 UTC 초기화).
+- **이 저장소 설정**(`config/providers.yaml`): `daily_limit: 800`, `daily_reserve: 100`(키당 하루 700 사용), `per_minute_limit: 7`, `max_symbols_per_run: 700`(순환 종목 수), `max_credits_per_run: 1400`(실행당 크레딧 상한), `outputsize: 5000`.
+- **크레딧 비용(2026-10-20 `/api_usage` 실측)**: `time_series` 1(5000행도 1), `/api_usage` 1, `/stocks`·`/etfs` 0, 403 응답 0.
+- **무료 키에서 막힌 것**: `/dividends`, `/splits`, `/splits_calendar`, `/dividends_calendar`(403, Grow 이상 전용; `/dividends`는 AAPL만 예외적으로 열림). 대신 `time_series`의 `adjust` 옵션을 씁니다.
+  - `adjust=splits`(기본): 분할 반영 OHLCV. Yahoo `Close`와 일치합니다.
+  - `adjust=all`: 배당까지 반영한 종가(`adj_close`). 2016년 이후 Yahoo `Adj Close`와 0.003% 이내지만, 2012~2013년 일부 배당(예: NVDA 첫 배당 3회, SPY 2012-09-21)이 빠져 있습니다.
+  - `adjust=none`: 실제 거래 가격. 분할 이벤트 계산에 씁니다.
 - **주의사항**:
-  - `state.json`의 `calls_used_today`를 기준으로 호출 가능 여부를 판단합니다.
-  - `src.fetch_tickers`는 stocks endpoint를 호출해 `config/symbols.txt`를 원자적으로 갱신하며, 기본 exchange는 NASDAQ입니다.
-  - `--force`는 당일 성공 심볼 재수집이므로 필요할 때만 사용합니다.
-
-## Alpha Vantage
-- **역할**: 보수적 백업 OHLCV 수집 provider (`src.alpha_vantage`).
-- **알려진 한도(이 저장소 기본 설정)**: `daily_limit: 25`, `daily_reserve: 5`, `per_minute_limit: 5`, `max_symbols_per_run: 5`.
-- **실제 사용 목표**: 주 수집기가 아니라 fallback/검증용 소량 수집.
-- **주의사항**:
-  - `TIME_SERIES_DAILY` + `outputsize=compact` 기반이라 대규모 백필 경로로 사용하지 않습니다.
-  - 응답의 `Note`/`Information`/`Error Message`를 오류로 처리합니다.
-
-## FRED
-- **역할**: 거시 지표 시리즈 수집 (`src.fred`).
-- **알려진 한도**: 코드/기본 설정 파일에 수치형 제한은 별도 정의되어 있지 않음.
-- **실제 사용 목표**: `config/fred_series.txt`의 소규모 시리즈(현재 11개)를 주기적으로 적재.
-- **주의사항**:
-  - 기본은 목록 전체 수집이며, `--limit`로 런당 처리량을 제한할 수 있습니다.
-  - 원본 응답은 `data/raw/fred/`에 저장됩니다.
+  - 키는 순서대로 다 쓰고 넘어갑니다. 실행 시작 때 `/api_usage`로 서버 사용량을 읽어 `state.json`보다 크면 그 값을 씁니다. 두 번 시도해도 읽지 못한 키는 그 실행에서 제외합니다.
+  - 네트워크 오류·응답 유실·5xx처럼 청구 여부가 불확실한 시도도 크레딧을 차감합니다.
+  - "for the current minute" 응답은 60초 쉬고 같은 키로 다시 시도합니다(최대 2번, 크레딧 미차감). "for the day" 응답은 그 키를 소진 처리하고 다음 키로 넘어갑니다.
+  - 404(종목 없음)는 다시 요청하지 않고 30일 뒤 재시도합니다.
+  - 무료 플랜은 개인·비상업 용도입니다.
 
 ## Finnhub
-- **역할**: 심볼별 company news 수집 (`src.finnhub_news`).
-- **알려진 한도**: 무료 플랜 분당 60회. 이 저장소는 `--per-minute-limit` 기본 30으로 절반만 사용.
-- **실제 사용 목표**: 런마다 `--limit`(run_daily 기본 300)개 심볼을 로테이션하며 뉴스 누적 수집.
+- **역할**: 종목별 company news(`src.finnhub_news`).
+- **무료 한도**: 분당 60회(응답 헤더 `X-Ratelimit-Limit: 60`), 하루 한도 없음. 과거 뉴스는 약 1년.
+- **이 저장소 설정**: 분당 50회(`FINNHUB_PER_MINUTE`), 첫 수집 365일(`FINNHUB_DAYS_BACK`), 종목당 실행마다 최대 10페이지(`FINNHUB_MAX_PAGES`), 대상은 전체 활성 종목(핵심 종목 먼저).
 - **주의사항**:
-  - DuckDB `news` 테이블에 `(symbol, id)` 기준으로 업서트됩니다.
-  - 심볼 선택 순서: 최근 시도가 가장 오래된 심볼(미수집 우선) → 최근 60거래일 평균 거래대금 큰 순.
-  - 심볼별 상태는 `data/state/finnhub_news.json`에 저장되며, 다음 수집은 마지막 성공 `to` 날짜 전날부터 이어집니다(최대 `--max-days-back`일).
+  - 응답은 최신 기사 약 250건에서 잘립니다. 200건 이상이고 가장 오래된 기사가 시작일보다 늦으면 `to`를 당겨 다시 요청합니다.
+  - 다 못 받은 구간은 `data/state/finnhub_news.json`에 저장해 다음 실행에서 이어 받습니다.
+  - 종목 표기는 `BRK.B`처럼 점 표기를 씁니다(`BRK-B`는 0건).
   - HTTP 429 응답 시 60초 대기 후 1회 재시도합니다.
 
-## providers.yaml 기본값과 이유
-- `twelve_data`와 `alpha_vantage`만 `config/providers.yaml`에 정의되어 있습니다.
-- 기본값은 모두 **보수적 운영**을 위한 값입니다.
-  - 일일 제한(`daily_limit`)보다 낮은 실사용 예산을 만들기 위해 `daily_reserve`를 분리.
-  - `max_symbols_per_run`을 작게 유지해 Raspberry Pi 환경에서 한 번의 실행 부담을 제한.
-  - `outputsize`는 Twelve Data(5000)와 Alpha Vantage(compact)의 의도된 용도를 반영.
+## FRED
+- **역할**: 거시 지표 시리즈(`src.fred`), 16개(`config/fred_series.txt`).
+- **알려진 한도**: 분당 120회(제3자 문서 기준, 응답 헤더 없음). 실행당 약 48회 호출(관측값·메타·발표처).
+- **주의사항**:
+  - `macro.first_seen_at`은 그 관측값을 처음 받은 시각이고 값이 수정돼도 유지됩니다.
+  - BAA10Y(Moody's), VIXCLS(Cboe)는 설명에 복제·저장 제한 문구가 있어 `series_meta.personal_use_only`로 표시합니다. 개인 연구용으로만 쓰고 `src.export_dataset`은 기본으로 제외합니다.
+  - IR3TIB01KRM156N은 한국 월간 3개월 금리이고 관측일 대비 약 44일 뒤 공개됩니다.
+
+## Alpha Vantage
+- **역할**: 보수적 백업 OHLCV(`src.alpha_vantage`), `run_daily.sh`에서 기본 꺼짐.
+- **이 저장소 설정**: `daily_limit: 25`, `daily_reserve: 5`, `per_minute_limit: 5`, `max_symbols_per_run: 5`.
+- **주의사항**: `TIME_SERIES_DAILY`는 분할 미반영 가격이고 Twelve Data와 같은 `ohlcv` 테이블에 덮어쓰므로, 켜면 가격 기준이 섞입니다.
+
+## 공개 데이터
+- **S&P 500 구성종목**: fja05680/sp500 GitHub CSV(stockpred와 같은 출처). 개인이 관리해 실제 지수 변경보다 늦게 반영될 수 있습니다(2026-10-20 기준 마지막 변경 2026-08-18).

@@ -11,3 +11,10 @@ REAINTRATREARAT10Y
 BOGMBASE
 DTWEXBGS
 DEXKOUS
+# Added 2026-10-20 for stockpred (DGS2, BAA10Y, VIXCLS, DTB3: daily; IR3TIB01KRM156N: Korea 3M interbank, monthly, ~44-day release lag).
+# BAA10Y (Moody's) and VIXCLS (Cboe) carry reproduction restrictions: personal research use only (series_meta.personal_use_only).
+DGS2
+BAA10Y
+VIXCLS
+DTB3
+IR3TIB01KRM156N

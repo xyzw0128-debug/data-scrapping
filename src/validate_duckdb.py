@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
+from src.lock import LockHeldError, lock_held_exit, pipeline_lock
 from src.storage import get_db_path
 from src.validate import save_report
 
@@ -67,7 +68,11 @@ def validate_with_duckdb(data_dir: Path) -> dict[str, object]:
 
 def main() -> int:
     args = parse_args()
-    report = validate_with_duckdb(args.data_dir)
+    try:
+        with pipeline_lock(args.data_dir):
+            report = validate_with_duckdb(args.data_dir)
+    except LockHeldError as exc:
+        return lock_held_exit(exc)
     output = args.output or args.data_dir / "logs" / "validation" / "duckdb_latest.json"
     report["report_path"] = str(save_report(output, report))
     print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))

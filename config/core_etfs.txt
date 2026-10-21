@@ -1,0 +1,24 @@
+# Core ETFs collected every trading day (stockpred universe). One symbol per line.
+SPY
+QQQ
+IWM
+EFA
+EEM
+VNQ
+TLT
+IEF
+SHY
+LQD
+HYG
+TIP
+GLD
+DBC
+XLB
+XLE
+XLF
+XLI
+XLK
+XLP
+XLU
+XLV
+XLY

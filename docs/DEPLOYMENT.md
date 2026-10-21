@@ -1,112 +1,76 @@
-# DEPLOYMENT (Raspberry Pi 5 + Ubuntu)
+# DEPLOYMENT (NucBox M6 + Ubuntu 26.04)
 
 ## 사전 조건
-- Python 3.11 이상
-- git
-- pip
-- 선택: rclone (백업 타이머 사용 시)
+- Python 3.11 이상 (`.venv`는 uv로 만든 Python 3.12)
+- git, `flock`(util-linux), systemd 사용자 인스턴스
+- 사용자 lingering: `loginctl show-user $USER -p Linger`가 `yes`여야 로그인하지 않은 상태에서도 타이머가 돕니다. `no`이면 `sudo loginctl enable-linger $USER`를 직접 실행합니다.
+- 선택: rclone (백업 사용 시)
 
-## 설치 순서
-1. 저장소 클론
-   ```bash
-   git clone <repo-url>
-   cd data-scrapping
-   ```
-2. 설치 스크립트 실행
-   ```bash
-   scripts/install_pi.sh
-   ```
-3. `/etc/data-scrapping.env` API 키 설정
-4. dry-run 수동 테스트
-5. 실제 1종목 테스트
-6. systemd timer 상태 확인
-
-## API 키 설정
-`/etc/data-scrapping.env`를 열어 실제 키를 입력합니다.
+## 설치
 
 ```bash
-sudoedit /etc/data-scrapping.env
-sudo chmod 600 /etc/data-scrapping.env
+scripts/install_local.sh
 ```
 
-필수 키(운영 시):
-- `TWELVE_DATA_API_KEY`
-- `FRED_API_KEY`
-- `FINNHUB_API_KEY`
-- 선택: `ALPHA_VANTAGE_API_KEY`, `DISCORD_WEBHOOK_URL`
+설치 스크립트가 하는 일:
+1. `.venv`가 없으면 만듭니다(uv가 있으면 uv, 없으면 `python3 -m venv`).
+2. `requirements.txt`를 `.venv`에 설치합니다.
+3. `.env`가 없으면 `.env.example`을 복사하고 권한을 600으로 둡니다.
+4. `systemd/`의 유닛 4개를 `~/.config/systemd/user/`에 설치합니다(`@ROOT@`를 저장소 경로로 바꿈).
+5. `data-scrapping.timer`를 켭니다. 백업 타이머는 `ENABLE_BACKUP=1`일 때만 켭니다.
 
-## 수동 테스트 명령
+sudo는 쓰지 않습니다. 수집기는 lael 계정으로 돌기 때문에 데이터 파일 소유자도 lael입니다.
+
+## API 키와 설정
+
+`.env`(gitignore 대상, `chmod 600`)에 키와 설정을 넣습니다. 항목은 `.env.example`을 참고합니다.
+
+- 필수: `TWELVE_DATA_API_KEY_1`(~`_3`), `FRED_API_KEY`, `FINNHUB_API_KEY`
+- 선택: `ALPHA_VANTAGE_API_KEY`, `DISCORD_WEBHOOK_URL`
+- 셸에서 준 값이 `.env`보다 우선합니다. 예: `DRY_RUN=1 scripts/run_daily.sh`
+
+## 실행 시각
+
+- `data-scrapping.timer`: `Mon..Fri 16:10 America/New_York`. 서머타임을 자동 반영합니다(겨울 06:10 KST, 여름 05:10 KST).
+- `Persistent=true`: PC가 꺼져 있어 놓친 실행은 켜질 때 바로 돕니다. 그때가 장중이어도 끝나지 않은 당일 봉은 저장하지 않습니다.
+- 소요 시간: 핵심 단계 약 2시간 30분(1,052크레딧 ÷ 분당 7회), 전체 약 3~5시간(뉴스 과거분을 채우는 첫 며칠은 더 김).
+
+## 수동 점검
+
 ```bash
 DRY_RUN=1 scripts/run_daily.sh
-python -m src.main --provider twelve_data --max-symbols 1
-python -m src.validate_duckdb
+.venv/bin/python -m src.main --phase core --only SPY --only NVDA
+.venv/bin/python -m src.snapshot --phase core --dry-run
+.venv/bin/python scripts/progress.py --once
 ```
 
-## systemd 운영 명령
-상태 확인:
-```bash
-sudo systemctl status data-scrapping.timer
-sudo systemctl status data-scrapping.service
-sudo systemctl status data-scrapping-backup.timer
-sudo systemctl status data-scrapping-backup.service
-```
-
-로그 확인:
-```bash
-sudo journalctl -u data-scrapping.service -n 200 --no-pager
-sudo journalctl -u data-scrapping-backup.service -n 200 --no-pager
-```
-
-enable:
-```bash
-sudo systemctl enable data-scrapping.timer
-sudo systemctl enable data-scrapping-backup.timer
-```
-
-disable:
-```bash
-sudo systemctl disable data-scrapping.timer
-sudo systemctl disable data-scrapping-backup.timer
-```
-
-수동 1회 실행:
-```bash
-sudo systemctl start data-scrapping.service
-sudo systemctl start data-scrapping-backup.service
-```
-
-## rclone 설정
-rclone은 별도 설치/설정이 필요합니다.
+## systemd 사용자 유닛 명령
 
 ```bash
-rclone config
+systemctl --user list-timers 'data-scrapping*' --all
+systemctl --user status data-scrapping.service
+journalctl --user -u data-scrapping -n 200 --no-pager
+systemctl --user start data-scrapping.service      # 지금 1회 실행
+systemctl --user disable --now data-scrapping.timer # 자동 실행 끄기
 ```
 
-`/etc/data-scrapping.env`에서 `RCLONE_DEST`를 설정합니다.
+## rclone 백업 (현재 꺼짐)
 
-```bash
-RCLONE_DEST=remote:data-scrapping
-```
+1. rclone 설치 후 `rclone config`로 remote를 만듭니다(Google Drive 로그인은 직접 진행).
+2. `.env`의 `RCLONE_DEST`(예: `Gdrive:data-scrapping`)를 확인합니다.
+3. 점검: `RCLONE_DRY_RUN=1 scripts/rclone_backup.sh`
+4. 켜기: `ENABLE_BACKUP=1 scripts/install_local.sh` 또는 `systemctl --user enable --now data-scrapping-backup.timer`
 
-백업 스크립트 dry-run 예시:
-```bash
-RCLONE_DRY_RUN=1 scripts/rclone_backup.sh
-```
+백업 스크립트는 단독으로 실행되면 파이프라인 잠금을 기다렸다가(최대 6시간) 복사하므로 쓰는 도중의 `market.db`를 올리지 않습니다. `run_daily.sh`의 `RUN_BACKUP=1`로 수집 직후에 돌릴 수도 있습니다.
 
-## SSD 마운트 사용 시
-코드/기존 스크립트가 지원하는 범위 내에서만 설정합니다.
+## 데이터 경로
 
-- 백업 스크립트 대상 경로: `/etc/data-scrapping.env`의 `BACKUP_DATA_DIR`
-- 수집기 데이터 경로 변경: 실행 명령에 `--data-dir` 사용
-  - 예: `python -m src.main --provider twelve_data --data-dir /mnt/ssd/data --max-symbols 1`
+- 모든 CLI는 `--data-dir`로 데이터 경로를 바꿀 수 있습니다. `run_daily.sh`는 저장소의 `data/`를 씁니다.
+- 디스크 사용량: `market.db` 약 0.9GB, 스냅숏 같은 크기, 원본 응답(gzip, 종목별 최신 1개) 약 0.6GB.
 
 ## 트러블슈팅
-- `data/state/collector.lock`이 남아 실행이 막히는 경우:
-  - 실행 중인 수집 프로세스가 없는지 확인 후 lock 파일을 정리합니다.
-- API 키 오류:
-  - `/etc/data-scrapping.env`의 키 이름/값을 재확인하고 서비스 재실행 후 로그를 확인합니다.
-- DuckDB 의존성 오류:
-  - `python -m pip install -r requirements.txt --break-system-packages` 재실행
-- 로그 확인:
-  - `data/logs/collector.log`
-  - `sudo journalctl -u data-scrapping.service -n 200 --no-pager`
+
+- `{"status": "lock_held"}`(종료 코드 2): 다른 실행이 파이프라인 잠금(`data/state/pipeline.lock`)을 잡고 있습니다. 잠금은 프로세스가 끝나면 커널이 풀기 때문에 파일을 지울 필요가 없습니다. `.venv/bin/python scripts/progress.py --once`로 상태를 봅니다.
+- 다른 프로그램이 `market.db`를 열어 두면 수집기 쓰기가 실패합니다. 읽기는 `market_snapshot.db`로 합니다.
+- API 키 오류: `.env`의 키 이름과 값을 확인한 뒤 `journalctl --user -u data-scrapping`과 `data/logs/collector.log`를 봅니다.
+- 의존성 오류: `scripts/install_local.sh`를 다시 실행합니다.

@@ -23,6 +23,7 @@ import shutil
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+from src.lock import LockHeldError, lock_held_exit, pipeline_lock
 from src.state import utc_now_iso
 from src.storage import get_db_path
 
@@ -47,6 +48,11 @@ MACRO_LABELS = {
     "BOGMBASE": "본원통화",
     "DTWEXBGS": "달러지수(광의)",
     "DEXKOUS": "원/달러 환율",
+    "DGS2": "미 국채 2년물(%)",
+    "BAA10Y": "Baa 회사채-10년물 스프레드(%p)",
+    "VIXCLS": "VIX",
+    "DTB3": "미 국채 3개월물(%)",
+    "IR3TIB01KRM156N": "한국 3개월 금리(%)",
 }
 
 FEATURE_DESCRIPTIONS = {
@@ -93,6 +99,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--jsonl-max-examples", type=int, default=20000, help="Maximum JSONL examples per split")
     parser.add_argument("--jsonl-flat-band", type=float, default=0.01, help="Absolute return below this is labelled 보합")
     parser.add_argument("--jsonl-news", type=int, default=5, help="Maximum recent headlines per JSONL prompt")
+    parser.add_argument("--include-personal-use-series", action="store_true", help="Also export FRED series flagged personal_use_only (copyright-restricted)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--memory-limit", default="4GB", help="DuckDB memory cap; larger intermediates spill to disk")
     return parser.parse_args()
@@ -125,11 +132,19 @@ def symbol_name_filter(include_all: bool) -> str:
     return "regexp_full_match(symbol, '[A-Z]{1,5}') AND NOT (length(symbol) = 5 AND right(symbol, 1) IN ('W', 'R', 'U'))"
 
 
-def macro_series(con) -> list[str]:
+def macro_series(con, include_personal_use: bool = False) -> list[str]:
     rows = con.execute(
         "SELECT DISTINCT series_id FROM src.macro WHERE TRY_CAST(value AS DOUBLE) IS NOT NULL ORDER BY series_id"
     ).fetchall()
-    return [row[0] for row in rows if SERIES_ID_PATTERN.match(row[0])]
+    series = [row[0] for row in rows if SERIES_ID_PATTERN.match(row[0])]
+    has_meta = con.execute(
+        "SELECT count(*) FROM duckdb_tables() WHERE database_name = 'src' AND table_name = 'series_meta'"
+    ).fetchone()[0]
+    if include_personal_use or not has_meta:
+        return series
+    # Series whose FRED notes restrict reproduction (e.g. BAA10Y, VIXCLS) stay out of exported files.
+    restricted = {row[0] for row in con.execute("SELECT series_id FROM src.series_meta WHERE personal_use_only").fetchall()}
+    return [sid for sid in series if sid not in restricted]
 
 
 def macro_column(series_id: str) -> str:
@@ -225,7 +240,7 @@ def build_tables(con, args: argparse.Namespace, horizons: list[int]) -> dict[str
         FROM valid v JOIN period p USING (series_id)
         """
     )
-    series = macro_series(con)
+    series = macro_series(con, args.include_personal_use_series)
     macro_select = "".join(f", {macro_column(sid)}.value AS {macro_column(sid)}" for sid in series)
     macro_joins = "".join(
         f"\nASOF LEFT JOIN (SELECT available_date, value FROM macro_avail WHERE series_id = '{sid}') {macro_column(sid)}"
@@ -483,9 +498,17 @@ def export_jsonl(con, out_dir: Path, args: argparse.Namespace, series: list[str]
 
 
 def main() -> int:
+    args = parse_args()
+    try:
+        with pipeline_lock(args.data_dir):
+            return export(args)
+    except LockHeldError as exc:
+        return lock_held_exit(exc)
+
+
+def export(args: argparse.Namespace) -> int:
     import duckdb  # type: ignore
 
-    args = parse_args()
     horizons = parse_horizons(args.horizons)
     if args.format in ("jsonl", "both") and args.jsonl_horizon not in horizons:
         raise ValueError("--jsonl-horizon must be one of --horizons")

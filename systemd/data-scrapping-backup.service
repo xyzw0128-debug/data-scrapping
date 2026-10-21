@@ -1,10 +1,10 @@
+# systemd user unit; scripts/install_local.sh replaces @ROOT@ and installs it to ~/.config/systemd/user.
 [Unit]
-Description=Backup personal market data collector outputs with rclone
-Wants=network-online.target
-After=network-online.target
+Description=Back up data-scrapping outputs with rclone
 
 [Service]
 Type=oneshot
-WorkingDirectory=/workspace/data-scrapping
-EnvironmentFile=-/etc/data-scrapping.env
-ExecStart=/workspace/data-scrapping/scripts/rclone_backup.sh
+WorkingDirectory=@ROOT@
+# rclone_backup.sh loads @ROOT@/.env and waits for a running collection (pipeline lock).
+ExecStart=@ROOT@/scripts/rclone_backup.sh
+Nice=10

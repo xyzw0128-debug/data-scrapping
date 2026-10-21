@@ -1,10 +1,9 @@
 [Unit]
-Description=Run personal market data rclone backup daily
+Description=Run the data-scrapping rclone backup daily
 
 [Timer]
-OnCalendar=*-*-* 23:30:00 UTC
+OnCalendar=*-*-* 23:30 America/New_York
 Persistent=true
-RandomizedDelaySec=15m
 
 [Install]
 WantedBy=timers.target

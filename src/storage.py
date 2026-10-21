@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import tempfile
@@ -17,9 +18,13 @@ MACRO_FIELDS = ["date", "value", "realtime_start", "realtime_end"]
 NEWS_FIELDS = ["id", "symbol", "datetime", "date", "headline", "source", "summary", "url", "image", "category"]
 
 OHLCV_COLUMNS = ["symbol", *OHLCV_FIELDS, "updated_at"]
+PRICE_COLUMNS = ["symbol", *OHLCV_FIELDS, "adj_close", "updated_at"]
 INDICATOR_COLUMNS = ["symbol", *OHLCV_FIELDS, *INDICATOR_FIELDS, "updated_at"]
-MACRO_COLUMNS = ["series_id", *MACRO_FIELDS, "updated_at"]
+MACRO_COLUMNS = ["series_id", *MACRO_FIELDS, "first_seen_at", "updated_at"]
 NEWS_COLUMNS = ["symbol", "id", "datetime", "date", "headline", "source", "summary", "url", "image", "category", "updated_at"]
+SERIES_META_COLUMNS = ["series_id", "title", "frequency", "units", "release", "license_note", "personal_use_only", "updated_at"]
+
+SCHEMA_VERSION = 3
 
 # Raw tables keep provider values as VARCHAR. These views expose the same rows with
 # DATE/DOUBLE/TIMESTAMP types for analysis and dataset export; unparseable values
@@ -29,7 +34,7 @@ TYPED_VIEW_SQL = {
         SELECT symbol, TRY_CAST(date AS DATE) AS date,
                TRY_CAST(open AS DOUBLE) AS open, TRY_CAST(high AS DOUBLE) AS high,
                TRY_CAST(low AS DOUBLE) AS low, TRY_CAST(close AS DOUBLE) AS close,
-               TRY_CAST(volume AS DOUBLE) AS volume, updated_at
+               TRY_CAST(volume AS DOUBLE) AS volume, TRY_CAST(adj_close AS DOUBLE) AS adj_close, updated_at
         FROM ohlcv""",
     "indicators_typed": """
         SELECT symbol, TRY_CAST(date AS DATE) AS date,
@@ -40,13 +45,52 @@ TYPED_VIEW_SQL = {
         FROM indicators""",
     "macro_typed": """
         SELECT series_id, TRY_CAST(date AS DATE) AS date, TRY_CAST(value AS DOUBLE) AS value,
-               realtime_start, realtime_end, updated_at
+               realtime_start, realtime_end, first_seen_at, updated_at
         FROM macro""",
     "news_typed": """
         SELECT symbol, id, TRY_CAST(replace(datetime, 'Z', '') AS TIMESTAMP) AS datetime_utc,
                TRY_CAST(date AS DATE) AS date, headline, source, summary, url, image, category, updated_at
         FROM news""",
+    # stockpred contract: same column names and meaning as stockpred's STD_COLS (yfinance
+    # auto_adjust=False, actions=True). close is split-adjusted, adj_close also reflects
+    # dividends, splits is the ratio on split dates. Dividends are unavailable on a Basic key.
+    "prices_daily": """
+        SELECT o.symbol, TRY_CAST(o.date AS DATE) AS date,
+               TRY_CAST(o.open AS DOUBLE) AS open, TRY_CAST(o.high AS DOUBLE) AS high,
+               TRY_CAST(o.low AS DOUBLE) AS low, TRY_CAST(o.close AS DOUBLE) AS close,
+               TRY_CAST(o.adj_close AS DOUBLE) AS adj_close, TRY_CAST(o.volume AS DOUBLE) AS volume,
+               0.0 AS dividends, coalesce(s.value, 0.0) AS splits
+        FROM ohlcv o
+        LEFT JOIN corporate_actions s
+          ON s.symbol = o.symbol AND s.type = 'split' AND s.date = TRY_CAST(o.date AS DATE)""",
 }
+
+BASE_TABLE_SQL = [
+    """CREATE TABLE IF NOT EXISTS ohlcv (symbol VARCHAR NOT NULL, date VARCHAR NOT NULL, open VARCHAR, high VARCHAR, low VARCHAR, close VARCHAR, volume VARCHAR, updated_at VARCHAR NOT NULL, PRIMARY KEY(symbol, date))""",
+    """CREATE TABLE IF NOT EXISTS indicators (symbol VARCHAR NOT NULL, date VARCHAR NOT NULL, open VARCHAR, high VARCHAR, low VARCHAR, close VARCHAR, volume VARCHAR, sma_20 VARCHAR, sma_50 VARCHAR, sma_200 VARCHAR, rsi_14 VARCHAR, macd_12_26 VARCHAR, macd_signal_9 VARCHAR, macd_hist VARCHAR, updated_at VARCHAR NOT NULL, PRIMARY KEY(symbol, date))""",
+    """CREATE TABLE IF NOT EXISTS macro (series_id VARCHAR NOT NULL, date VARCHAR NOT NULL, value VARCHAR, realtime_start VARCHAR, realtime_end VARCHAR, updated_at VARCHAR NOT NULL, PRIMARY KEY(series_id, date))""",
+    """CREATE TABLE IF NOT EXISTS news (symbol VARCHAR NOT NULL, id VARCHAR NOT NULL, datetime VARCHAR, date VARCHAR, headline VARCHAR, source VARCHAR, summary VARCHAR, url VARCHAR, image VARCHAR, category VARCHAR, updated_at VARCHAR NOT NULL, PRIMARY KEY(symbol, id))""",
+    """CREATE TABLE IF NOT EXISTS schema_meta (key VARCHAR PRIMARY KEY, value VARCHAR)""",
+]
+
+# Schema version 2: adj_close, macro first_seen_at, corporate actions, snapshot status tables.
+MIGRATION_V2_SQL = [
+    "ALTER TABLE ohlcv ADD COLUMN IF NOT EXISTS adj_close VARCHAR",
+    "ALTER TABLE macro ADD COLUMN IF NOT EXISTS first_seen_at VARCHAR",
+    """CREATE TABLE IF NOT EXISTS corporate_actions (symbol VARCHAR NOT NULL, date DATE NOT NULL, type VARCHAR NOT NULL, value DOUBLE NOT NULL, source VARCHAR, updated_at VARCHAR NOT NULL, PRIMARY KEY(symbol, date, type))""",
+    """CREATE TABLE IF NOT EXISTS symbol_status (symbol VARCHAR PRIMARY KEY, yahoo_symbol VARCHAR, group_name VARCHAR, active BOOLEAN, delisted_at VARCHAR, last_bar_date DATE, last_success_at VARCHAR, core_session DATE, splits_complete BOOLEAN, updated_at VARCHAR)""",
+    """CREATE TABLE IF NOT EXISTS collection_runs (run_id VARCHAR NOT NULL, phase VARCHAR NOT NULL, started_at VARCHAR, finished_at VARCHAR, session_date DATE, status VARCHAR, core_expected INTEGER, core_ok INTEGER, missing_symbols VARCHAR, fred_expected INTEGER, fred_ok INTEGER, missing_series VARCHAR, note VARCHAR, PRIMARY KEY(run_id, phase))""",
+    """CREATE TABLE IF NOT EXISTS series_meta (series_id VARCHAR PRIMARY KEY, title VARCHAR, frequency VARCHAR, units VARCHAR, release VARCHAR, license_note VARCHAR, personal_use_only BOOLEAN, updated_at VARCHAR)""",
+]
+
+# Schema version 3: completion details in collection_runs.
+MIGRATION_V3_SQL = [
+    "ALTER TABLE collection_runs ADD COLUMN IF NOT EXISTS splits_ok INTEGER",
+    "ALTER TABLE collection_runs ADD COLUMN IF NOT EXISTS missing_splits VARCHAR",
+    "ALTER TABLE collection_runs ADD COLUMN IF NOT EXISTS universe_issue VARCHAR",
+]
+
+_SCHEMA_READY: set[str] = set()
 
 
 def ensure_data_dirs(data_dir: Path) -> None:
@@ -67,6 +111,10 @@ def get_db_path(data_dir: Path) -> Path:
     return data_dir / "db" / "market.db"
 
 
+def get_snapshot_path(data_dir: Path) -> Path:
+    return data_dir / "db" / "market_snapshot.db"
+
+
 def connect_db(data_dir: Path, read_only: bool = False):
     import duckdb  # type: ignore
 
@@ -79,25 +127,41 @@ def connect_db(data_dir: Path, read_only: bool = False):
 _connect_db = connect_db
 
 
+def _schema_version(con) -> int:
+    row = con.execute("SELECT value FROM schema_meta WHERE key = 'version'").fetchone()
+    return int(row[0]) if row else 1
+
+
 def ensure_db_schema(data_dir: Path) -> Path:
+    """Create tables, apply migrations, and (re)create views once per process."""
     db_path = get_db_path(data_dir)
+    if str(db_path) in _SCHEMA_READY and db_path.exists():
+        return db_path
     con = _connect_db(data_dir)
     try:
         con.begin()
-        con.execute("""CREATE TABLE IF NOT EXISTS ohlcv (symbol VARCHAR NOT NULL, date VARCHAR NOT NULL, open VARCHAR, high VARCHAR, low VARCHAR, close VARCHAR, volume VARCHAR, updated_at VARCHAR NOT NULL, PRIMARY KEY(symbol, date))""")
-        con.execute("""CREATE TABLE IF NOT EXISTS indicators (symbol VARCHAR NOT NULL, date VARCHAR NOT NULL, open VARCHAR, high VARCHAR, low VARCHAR, close VARCHAR, volume VARCHAR, sma_20 VARCHAR, sma_50 VARCHAR, sma_200 VARCHAR, rsi_14 VARCHAR, macd_12_26 VARCHAR, macd_signal_9 VARCHAR, macd_hist VARCHAR, updated_at VARCHAR NOT NULL, PRIMARY KEY(symbol, date))""")
-        con.execute("""CREATE TABLE IF NOT EXISTS macro (series_id VARCHAR NOT NULL, date VARCHAR NOT NULL, value VARCHAR, realtime_start VARCHAR, realtime_end VARCHAR, updated_at VARCHAR NOT NULL, PRIMARY KEY(series_id, date))""")
-        con.execute("""CREATE TABLE IF NOT EXISTS news (symbol VARCHAR NOT NULL, id VARCHAR NOT NULL, datetime VARCHAR, date VARCHAR, headline VARCHAR, source VARCHAR, summary VARCHAR, url VARCHAR, image VARCHAR, category VARCHAR, updated_at VARCHAR NOT NULL, PRIMARY KEY(symbol, id))""")
+        for sql in BASE_TABLE_SQL:
+            con.execute(sql)
+        version = _schema_version(con)
+        if version < 2:
+            for sql in MIGRATION_V2_SQL:
+                con.execute(sql)
+        if version < 3:
+            for sql in MIGRATION_V3_SQL:
+                con.execute(sql)
         existing_views = {row[0] for row in con.execute("SELECT view_name FROM duckdb_views() WHERE NOT internal").fetchall()}
         for view_name, sql in TYPED_VIEW_SQL.items():
-            if view_name not in existing_views:
+            if version < SCHEMA_VERSION or view_name not in existing_views:
                 con.execute(f"CREATE OR REPLACE VIEW {view_name} AS {sql}")
+        if version < SCHEMA_VERSION:
+            con.execute("INSERT OR REPLACE INTO schema_meta VALUES ('version', ?)", [str(SCHEMA_VERSION)])
         con.commit()
     except Exception:
         con.rollback()
         raise
     finally:
         con.close()
+    _SCHEMA_READY.add(str(db_path))
     return db_path
 
 
@@ -108,14 +172,18 @@ def bulk_upsert(
     columns: Sequence[str],
     key_columns: Sequence[str],
     rows: Iterable[Sequence[Any]],
+    update_columns: Sequence[str] | None = None,
 ) -> int:
-    """Upsert many rows with one INSERT OR REPLACE statement.
+    """Upsert many rows with one statement.
 
     Rows are staged as newline-delimited JSON next to market.db and loaded with
     read_json. One INSERT ... ON CONFLICT per row costs several milliseconds on a
     multi-million-row table (about 20 seconds for a 5000-day symbol); staging the
     batch is roughly a thousand times faster. JSON keeps strings exact, so empty
     strings, quotes, and newlines in news text round-trip unchanged.
+
+    By default a conflicting row is replaced. With ``update_columns`` only those
+    columns are updated, so other columns of existing rows (e.g. first_seen_at) survive.
     """
     key_indexes = [columns.index(column) for column in key_columns]
     deduped: dict[tuple[Any, ...], Sequence[Any]] = {}
@@ -134,22 +202,31 @@ def bulk_upsert(
                 handle.write("\n")
         column_list = ", ".join(columns)
         column_types = ", ".join(f"'{column}': 'VARCHAR'" for column in columns)
-        con.execute(
-            f"INSERT OR REPLACE INTO {table} ({column_list}) "
-            f"SELECT {column_list} FROM read_json(?, format = 'newline_delimited', columns = {{{column_types}}})",
-            [staging_name],
-        )
+        select = f"SELECT {column_list} FROM read_json(?, format = 'newline_delimited', columns = {{{column_types}}})"
+        if update_columns is None:
+            sql = f"INSERT OR REPLACE INTO {table} ({column_list}) {select}"
+        else:
+            assignments = ", ".join(f"{column} = excluded.{column}" for column in update_columns)
+            sql = f"INSERT INTO {table} ({column_list}) {select} ON CONFLICT ({', '.join(key_columns)}) DO UPDATE SET {assignments}"
+        con.execute(sql, [staging_name])
     finally:
         os.unlink(staging_name)
     return len(deduped)
 
 
-def _upsert(data_dir: Path, table: str, columns: Sequence[str], key_columns: Sequence[str], rows: list[Sequence[Any]]) -> str:
+def _upsert(
+    data_dir: Path,
+    table: str,
+    columns: Sequence[str],
+    key_columns: Sequence[str],
+    rows: list[Sequence[Any]],
+    update_columns: Sequence[str] | None = None,
+) -> str:
     db_path = ensure_db_schema(data_dir)
     con = _connect_db(data_dir)
     try:
         con.begin()
-        bulk_upsert(con, data_dir, table, columns, key_columns, rows)
+        bulk_upsert(con, data_dir, table, columns, key_columns, rows, update_columns)
         con.commit()
     except Exception:
         con.rollback()
@@ -159,19 +236,34 @@ def _upsert(data_dir: Path, table: str, columns: Sequence[str], key_columns: Seq
     return str(db_path)
 
 
-def save_raw_json(data_dir: Path, provider: str, symbol: str, payload: dict[str, Any]) -> Path:
-    safe_symbol = symbol.replace("/", "_")
-    stamp = utc_now_iso().replace(":", "").replace("-", "")
-    raw_dir = data_dir / "raw" / provider
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    path = raw_dir / f"{safe_symbol}_{stamp}.json"
-    tmp_path = path.with_suffix(".json.tmp")
-    with tmp_path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
-        handle.write("\n")
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(path.name + ".tmp")
+    with tmp_path.open("wb") as handle:
+        handle.write(data)
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(tmp_path, path)
+
+
+def save_raw_json(data_dir: Path, provider: str, symbol: str, payload: dict[str, Any]) -> Path:
+    """Archive a response as a new timestamped file (small, infrequent responses)."""
+    safe_symbol = symbol.replace("/", "_")
+    stamp = utc_now_iso().replace(":", "").replace("-", "")
+    path = data_dir / "raw" / provider / f"{safe_symbol}_{stamp}.json"
+    _atomic_write_bytes(path, (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+    return path
+
+
+def save_raw_latest(data_dir: Path, provider: str, name: str, payload: Any) -> Path:
+    """Keep only the latest response per provider/name, gzip-compressed.
+
+    Daily full-history refetches would otherwise add about 1 GB of JSON per day; one
+    compressed file per symbol and adjust mode keeps the archive bounded (~0.6 GB).
+    """
+    safe_name = name.replace("/", "_")
+    path = data_dir / "raw" / provider / f"{safe_name}.json.gz"
+    _atomic_write_bytes(path, gzip.compress(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")))
     return path
 
 
@@ -201,6 +293,69 @@ def upsert_ohlcv_db(data_dir: Path, symbol: str, rows: list[dict[str, str]]) -> 
     return _upsert(data_dir, "ohlcv", OHLCV_COLUMNS, ["symbol", "date"], values)
 
 
+def replace_symbol_prices(data_dir: Path, symbol: str, rows: list[dict[str, str]], adj_closes: dict[str, str] | None = None) -> str:
+    """Replace every OHLCV row of a symbol in one transaction.
+
+    Old rows outside the new response (an older split basis, or history beyond the
+    5000-row window) are removed. The symbol's indicator rows are removed too, so the next
+    indicator run recalculates them from the new prices.
+    """
+    db_path = ensure_db_schema(data_dir)
+    now = utc_now_iso()
+    adj_closes = adj_closes or {}
+    values = [
+        [symbol, *(row.get(field, "") for field in OHLCV_FIELDS), adj_closes.get(row["date"]), now]
+        for row in rows
+        if row.get("date")
+    ]
+    con = _connect_db(data_dir)
+    try:
+        con.begin()
+        con.execute("DELETE FROM ohlcv WHERE symbol = ?", [symbol])
+        con.execute("DELETE FROM indicators WHERE symbol = ?", [symbol])
+        bulk_upsert(con, data_dir, "ohlcv", PRICE_COLUMNS, ["symbol", "date"], values)
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+    return str(db_path)
+
+
+def replace_split_events(data_dir: Path, symbol: str, events: list[tuple[str, float]], source: str) -> None:
+    """Replace a symbol's split events."""
+    ensure_db_schema(data_dir)
+    now = utc_now_iso()
+    con = _connect_db(data_dir)
+    try:
+        con.begin()
+        con.execute("DELETE FROM corporate_actions WHERE symbol = ? AND type = 'split'", [symbol])
+        if events:
+            con.executemany(
+                "INSERT INTO corporate_actions VALUES (?, CAST(? AS DATE), 'split', ?, ?, ?)",
+                [[symbol, day, value, source, now] for day, value in events],
+            )
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+
+
+def load_closes(data_dir: Path, symbol: str) -> dict[str, float]:
+    """Stored split-adjusted closes of a symbol by date (empty when absent)."""
+    if not get_db_path(data_dir).exists():
+        return {}
+    con = _connect_db(data_dir)
+    try:
+        rows = con.execute("SELECT date, TRY_CAST(close AS DOUBLE) FROM ohlcv WHERE symbol = ?", [symbol]).fetchall()
+    finally:
+        con.close()
+    return {day: close for day, close in rows if close is not None}
+
+
 def indicator_values(symbol: str, rows: list[dict[str, str]], updated_at: str) -> list[list[str]]:
     """Convert indicator rows into value lists ordered like INDICATOR_COLUMNS."""
     return [
@@ -216,13 +371,20 @@ def save_indicator_rows_db(data_dir: Path, symbol: str, rows: list[dict[str, str
 
 
 def upsert_macro_db(data_dir: Path, series_id: str, rows: list[dict[str, str]]) -> str:
+    """Upsert observations; first_seen_at keeps the time an observation date was first stored."""
     now = utc_now_iso()
     values = [
-        [series_id, *(row.get(field, "") for field in MACRO_FIELDS), now]
+        [series_id, *(row.get(field, "") for field in MACRO_FIELDS), now, now]
         for row in rows
         if row.get("date")
     ]
-    return _upsert(data_dir, "macro", MACRO_COLUMNS, ["series_id", "date"], values)
+    return _upsert(data_dir, "macro", MACRO_COLUMNS, ["series_id", "date"], values, update_columns=["value", "realtime_start", "realtime_end", "updated_at"])
+
+
+def upsert_series_meta(data_dir: Path, rows: list[dict[str, Any]]) -> str:
+    now = utc_now_iso()
+    values = [[*(row.get(column) for column in SERIES_META_COLUMNS[:-1]), now] for row in rows]
+    return _upsert(data_dir, "series_meta", SERIES_META_COLUMNS, ["series_id"], values)
 
 
 def upsert_news_db(data_dir: Path, symbol: str, rows: list[dict[str, str]]) -> str:
