@@ -4,10 +4,11 @@ import argparse, json, os
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.request import Request, urlopen
+from src.atomic_io import atomic_write_json
 from src.env import load_project_env
 from src.lock import LockHeldError, lock_held_exit, pipeline_lock
 from src.state import utc_today
-from src.storage import ensure_data_dirs, get_db_path
+from src.storage import ensure_data_dirs, get_db_path, get_snapshot_path
 ROOT = Path(__file__).resolve().parents[1]
 
 def parse_args() -> argparse.Namespace:
@@ -58,18 +59,24 @@ def _db_counts(data_dir: Path)->dict[str,object]:
     finally: con.close()
     return {"db_path": str(db), "exists": True, "tables": tables, "last_collection_run": last_run}
 
+def _db_file_sizes(data_dir: Path)->dict[str,object]:
+    """Byte sizes of market.db and market_snapshot.db (None when missing); daily full replacement grows them."""
+    paths={"market_db_bytes": get_db_path(data_dir), "snapshot_bytes": get_snapshot_path(data_dir)}
+    return {k:(p.stat().st_size if p.exists() else None) for k,p in paths.items()}
+
 def build_summary(data_dir: Path)->dict[str,object]:
     ensure_data_dirs(data_dir); (data_dir/"logs"/"daily").mkdir(parents=True,exist_ok=True)
     raw_json_count=sum(1 for i in (data_dir/"raw").glob("**/*.json*") if i.is_file())
-    return {"generated_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace('+00:00','Z'),"date": utc_today(),"state": read_state_summary(data_dir),"files": {"raw_json_count": raw_json_count,"db": _db_counts(data_dir)},"hardware": {"disk": read_disk_summary(data_dir),"cpu_temp_c": read_cpu_temp_c()}}
+    return {"generated_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace('+00:00','Z'),"date": utc_today(),"state": read_state_summary(data_dir),"files": {"raw_json_count": raw_json_count,"db": _db_counts(data_dir),"db_files": _db_file_sizes(data_dir)},"hardware": {"disk": read_disk_summary(data_dir),"cpu_temp_c": read_cpu_temp_c()}}
 
 def save_summary(path:Path, summary:dict[str,object])->Path:
-    path.parent.mkdir(parents=True,exist_ok=True); tmp=path.with_suffix(path.suffix+'.tmp'); tmp.write_text(json.dumps(summary,ensure_ascii=False,indent=2,sort_keys=True)+"\n",encoding='utf-8'); os.replace(tmp,path); return path
+    return atomic_write_json(path, summary)
 
 def format_discord_message(summary:dict[str,object])->str:
     t=summary['files']['db']['tables']; d=summary['hardware']['disk']; r=summary['files']['db'].get('last_collection_run') or {}
     run=f"\nrun={r.get('status')} session={r.get('session_date')} core={r.get('core_ok')}/{r.get('core_expected')} fred={r.get('fred_ok')}/{r.get('fred_expected')}" if r else ""
-    return f"[data-scrapping] {summary['date']} summary\nraw_json={summary['files']['raw_json_count']} ohlcv={t['ohlcv']} indicators={t['indicators']} macro={t['macro']} news={t['news']}{run}\ndisk_free_gb={d['free_gb']} cpu_temp_c={summary['hardware']['cpu_temp_c']}"
+    sizes=summary['files'].get('db_files') or {}; mb=lambda b: "-" if b is None else round(b/1e6)
+    return f"[data-scrapping] {summary['date']} summary\nraw_json={summary['files']['raw_json_count']} ohlcv={t['ohlcv']} indicators={t['indicators']} macro={t['macro']} news={t['news']}{run}\ndb_mb={mb(sizes.get('market_db_bytes'))} snapshot_mb={mb(sizes.get('snapshot_bytes'))} disk_free_gb={d['free_gb']} cpu_temp_c={summary['hardware']['cpu_temp_c']}"
 
 def send_discord(url:str,msg:str)->None:
     req=Request(

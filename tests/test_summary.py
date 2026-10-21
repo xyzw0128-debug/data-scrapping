@@ -36,6 +36,20 @@ class SummaryMainTest(unittest.TestCase):
         self.assertEqual(saved["date"], utc_today())
         self.assertEqual(json.loads(printed)["summary_path"], str(path))
 
+    def test_summary_records_db_file_sizes(self) -> None:
+        from src.storage import ensure_db_schema, get_db_path, get_snapshot_path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            empty = summary.build_summary(data_dir)["files"]["db_files"]
+            ensure_db_schema(data_dir)
+            get_snapshot_path(data_dir).write_bytes(get_db_path(data_dir).read_bytes())
+            built = summary.build_summary(data_dir)
+            size = get_db_path(data_dir).stat().st_size
+        self.assertEqual(empty, {"market_db_bytes": None, "snapshot_bytes": None})
+        self.assertEqual(built["files"]["db_files"], {"market_db_bytes": size, "snapshot_bytes": size})
+        self.assertIn(f"db_mb={round(size / 1e6)} snapshot_mb={round(size / 1e6)}", summary.format_discord_message(built))
+
     def test_lock_held_exits_without_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

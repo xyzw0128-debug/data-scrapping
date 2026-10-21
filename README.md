@@ -43,7 +43,7 @@ docs/
 scripts/
   install_local.sh  lib_env.sh  progress.py  rclone_backup.sh  run_daily.sh
 src/
-  alpha_vantage.py  config.py  corporate_actions.py  discord_status.py  env.py
+  alpha_vantage.py  atomic_io.py  catalog.py  config.py  corporate_actions.py  discord_status.py  env.py
   export_dataset.py  fetch_tickers.py  finnhub_news.py  fred.py  indicators.py
   lock.py  logging_utils.py  main.py  market_calendar.py  rate_limit.py
   scheduling.py  snapshot.py  state.py  storage.py  summary.py  twelve_data.py
@@ -122,7 +122,7 @@ Output in `data/datasets/<name>/`: Parquet features/labels, chat-format JSONL, a
 
 ```bash
 .venv/bin/python scripts/progress.py          # live progress (running stage, core completion, news progress, key budgets)
-.venv/bin/python -m src.summary               # data/logs/daily/<date>.json
+.venv/bin/python -m src.summary               # data/logs/daily/<date>.json (table counts, DB and snapshot file sizes, disk, CPU temperature)
 .venv/bin/python -m src.validate_duckdb       # data/logs/validation/duckdb_latest.json
 journalctl --user -u data-scrapping -n 200 --no-pager
 ```

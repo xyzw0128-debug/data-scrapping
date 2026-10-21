@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from src.atomic_io import atomic_write_json
 
 
 def utc_today() -> str:
@@ -38,14 +39,7 @@ def load_state(path: Path) -> dict[str, Any]:
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
     """Atomically save state.json."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    with tmp_path.open("w", encoding="utf-8") as handle:
-        json.dump(state, handle, ensure_ascii=False, indent=2, sort_keys=True)
-        handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp_path, path)
+    atomic_write_json(path, state)
 
 
 def ensure_daily_provider_state(
