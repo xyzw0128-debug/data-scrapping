@@ -79,5 +79,34 @@ class RenderTest(unittest.TestCase):
             self.assertIn("비정상 종료", self._render(data_dir, stale))
 
 
+@patch.dict(os.environ, {"NO_COLOR": "1"})
+class FailureCountTest(unittest.TestCase):
+    """Old failures stay in state.json until their next attempt; they must not count as today's."""
+
+    def _state(self, now: datetime) -> dict:
+        today, hours_ago, old = _iso(now), _iso(now - timedelta(hours=3)), "2026-06-25T07:25:31Z"
+        return {"symbols": {
+            "OK": {"twelve_data": {"status": "done", "last_success_date": now.date().isoformat(), "updated_at": today}},
+            "NEWFAIL": {"twelve_data": {"status": "failed", "updated_at": today, "error": "HTTP Error 502"}},
+            "NOTFOUND": {"twelve_data": {"status": "not_found", "updated_at": hours_ago, "error": "Data not found"}},
+            "SKIP": {"twelve_data": {"status": "skipped_rate_limit", "updated_at": today}},
+            "OLDFAIL": {"twelve_data": {"status": "failed", "updated_at": old, "error": None}},
+            "OLDSKIP": {"twelve_data": {"status": "skipped_rate_limit", "updated_at": _iso(now - timedelta(days=2))}},
+        }}
+
+    def test_today_stats_counts_only_todays_failures_and_skips(self) -> None:
+        now = datetime.now(UTC).replace(hour=12)
+        with patch.object(progress, "datetime", wraps=datetime) as fake:
+            fake.now.return_value = now
+            self.assertEqual(progress.today_stats(self._state(now)), (1, 2, 1))
+
+    def test_recent_failures_include_not_found_with_date_and_skip_old_ones(self) -> None:
+        now = datetime(2026, 10, 22, 1, 0, tzinfo=UTC)
+        lines = progress.recent_failures(self._state(now), now=now)
+        self.assertEqual([line.split()[2] for line in lines], ["NEWFAIL", "NOTFOUND"])
+        self.assertIn(now.astimezone().strftime("%m-%d %H:%M"), lines[0])
+        self.assertFalse(any("OLDFAIL" in line for line in lines))
+
+
 if __name__ == "__main__":
     unittest.main()

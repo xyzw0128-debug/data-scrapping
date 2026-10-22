@@ -179,13 +179,14 @@
 - `macro.first_seen_at`: 수집기가 그 관측값을 처음 받은 시각. 기존 행은 NULL(기록 시작 전)입니다. 값이 수정돼도 유지됩니다.
 - `series_meta.personal_use_only`: 시리즈 설명에 저작권·복제 제한 문구가 있으면 참입니다(BAA10Y: Moody's, VIXCLS: CBOE). 개인 연구용으로만 쓰고, `src.export_dataset`은 기본으로 제외합니다.
 - IR3TIB01KRM156N은 한국 월간 지표이며 관측일 대비 약 44일 뒤 공개됩니다.
+- FRED 점검 페이지(HTTP 200 HTML)처럼 JSON이 아닌 응답은 `FredUnavailable`로 기록하고, 그 실행에서 남은 시리즈는 요청하지 않습니다. 단계는 실패(종료 코드 1)이고 완료 판정은 `missing_series`로 `partial`이 됩니다. 관측값은 매번 전체 이력을 받으므로 다음 성공 실행에서 채워집니다.
 
 ## 8. 실행 환경
 
 - Python: `run_daily.sh` 기본값은 `.venv/bin/python`(없으면 `python3`).
 - 설정: `run_daily.sh`도 `.env`를 읽습니다. 셸에서 준 값이 우선입니다. `/etc/data-scrapping.env`는 쓰지 않습니다.
 - 설치: `scripts/install_local.sh`(venv 확인·생성, 패키지 설치, 사용자 유닛 설치·활성화). 백업 타이머는 설치만 하고 켜지 않습니다.
-- 상태 표시: `summary.py`는 CPU 온도를 hwmon `k10temp`에서 읽습니다. `progress.py`는 종목 수를 파일에서 읽고 UTC 날짜를 씁니다. 잠금은 잡혀 있는데 `current_run`이 없으면(Twelve Data 외 단계) "실행 중"과 현재 단계(잠금 보유 프로세스와 그 자식의 명령줄), 뉴스 진행률(`finnhub_news.json`에서 잠금을 잡은 뒤 시도한 종목 수)을 보여 줍니다.
+- 상태 표시: `summary.py`는 CPU 온도를 hwmon `k10temp`에서 읽습니다. `progress.py`는 종목 수를 파일에서 읽고 UTC 날짜를 씁니다. 잠금은 잡혀 있는데 `current_run`이 없으면(Twelve Data 외 단계) "실행 중"과 현재 단계(잠금 보유 프로세스와 그 자식의 명령줄), 뉴스 진행률(`finnhub_news.json`에서 잠금을 잡은 뒤 시도한 종목 수)을 보여 줍니다. "오늘(UTC)" 실패·건너뜀 수는 `updated_at`이 오늘(UTC)인 종목만 세고(`failed`·`not_found`), 최근 실패 목록은 최근 24시간 안의 실패를 날짜와 함께 보여 줍니다.
 
 ## 9. 작업 순서
 

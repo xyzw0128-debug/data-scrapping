@@ -28,6 +28,11 @@ FRED_API_ROOT = "https://api.stlouisfed.org/fred"
 FRED_BASE_URL = f"{FRED_API_ROOT}/series/observations"
 MACRO_FIELDS = ["date", "value", "realtime_start", "realtime_end"]
 RIGHTS_PATTERN = re.compile(r"copyright|reproduc|permission|prohibit|redistribut|licens", re.IGNORECASE)
+TITLE_PATTERN = re.compile(r"<title>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+
+class FredUnavailable(RuntimeError):
+    """FRED answered with something other than JSON, e.g. its "Site Maintenance" page (HTTP 200)."""
 
 
 def parse_args() -> argparse.Namespace:
@@ -60,11 +65,24 @@ def build_fred_url(series_id: str, api_key: str, endpoint: str = "series/observa
     return f"{FRED_API_ROOT}/{endpoint}?{urlencode(params)}"
 
 
+def describe_body(body: bytes) -> str:
+    """Short description of a non-JSON body: its HTML title, else its first characters."""
+    text = body.decode("utf-8", "replace")
+    match = TITLE_PATTERN.search(text)
+    snippet = " ".join((match.group(1) if match else text).split())
+    return snippet[:80] or "empty body"
+
+
 def fetch_json(url: str) -> dict:
-    """Fetch JSON from FRED."""
+    """Fetch JSON from FRED. A non-JSON answer raises FredUnavailable naming what came back."""
     request = Request(url, headers={"User-Agent": "data-scrapping-fred/0.2"})
     with urlopen(request, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8"))
+        body = response.read()
+        status, content_type = response.status, response.headers.get("Content-Type") or "no content type"
+    try:
+        return json.loads(body.decode("utf-8"))
+    except ValueError:  # JSONDecodeError and UnicodeDecodeError
+        raise FredUnavailable(f"FRED returned non-JSON (HTTP {status}, {content_type}): {describe_body(body)}") from None
 
 
 def normalize_observations(payload: dict) -> list[dict[str, str]]:
@@ -147,14 +165,19 @@ def run(args: argparse.Namespace) -> dict:
     fred_state = load_state(state_path) if state_path.exists() else {"schema_version": 1}
     entries = fred_state.setdefault("series", {})
     summary = {"started_at": utc_now_iso(), "dry_run": args.dry_run, "processed": 0, "failed": 0, "series": []}
+    unavailable: str | None = None  # once FRED serves a non-JSON page, the remaining series are not requested
     for series_id in series_ids:
         entry = entries.setdefault(series_id, {})
         try:
+            if unavailable:
+                raise FredUnavailable(f"not requested: {unavailable}")
             status, row_count, note = collect_series(args.data_dir, series_id, api_key, args.dry_run)
             summary["processed"] += 1
             summary["series"].append({"series_id": series_id, "status": status, "rows": row_count, "note": note})
             entry.update({"status": status, "rows": row_count, "last_success_at": utc_now_iso(), "error": None})
         except Exception as exc:
+            if isinstance(exc, FredUnavailable) and not unavailable:
+                unavailable = summary["unavailable"] = str(exc)
             summary["failed"] += 1
             summary["series"].append({"series_id": series_id, "status": "failed", "error": str(exc)})
             entry.update({"status": "failed", "last_attempt_at": utc_now_iso(), "error": str(exc)})

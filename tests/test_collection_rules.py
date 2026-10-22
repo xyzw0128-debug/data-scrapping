@@ -1,4 +1,4 @@
-"""Collection order, session calendar, split derivation, locks, universe, snapshot, news paging, FRED rights."""
+"""Collection order, session calendar, split derivation, locks, universe, snapshot, news paging, FRED rights and outages."""
 
 from __future__ import annotations
 
@@ -345,6 +345,31 @@ class FredTest(unittest.TestCase):
         self.assertIsNone(fred.rights_note("Averages of business days. Source: H.15 release."))
         note = fred.rights_note("Spread data. Copyright, 2016, Chicago Board Options Exchange, Inc. Reprinted with permission.")
         self.assertIn("Copyright", note)
+
+    def test_non_json_answer_names_what_came_back(self) -> None:
+        class Response(io.BytesIO):
+            status = 200
+            headers = {"Content-Type": "text/html; charset=utf-8"}
+
+        page = b"<!doctype html><html><head>\n<title>Site Maintenance | St. Louis Fed<</title></head><body>We'll be back soon!</body></html>"
+        with patch.object(fred, "urlopen", return_value=Response(page)):
+            with self.assertRaises(fred.FredUnavailable) as caught:
+                fred.fetch_json("https://api.stlouisfed.org/fred/series/observations?series_id=DGS10")
+        self.assertEqual(str(caught.exception), "FRED returned non-JSON (HTTP 200, text/html; charset=utf-8): Site Maintenance | St. Louis Fed<")
+        self.assertEqual(fred.describe_body(b"  \n"), "empty body")
+        self.assertEqual(fred.describe_body(b"Service  Unavailable"), "Service Unavailable")
+
+    def test_unavailable_fred_is_not_asked_for_the_remaining_series(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = SimpleNamespace(data_dir=Path(tmp), series=["FEDFUNDS", "DGS10", "VIXCLS"], series_file=None, limit=None, api_key_env="FRED_API_KEY", dry_run=False)
+            down = fred.FredUnavailable("FRED returned non-JSON (HTTP 200, text/html): Site Maintenance")
+            with patch.dict(os.environ, {"FRED_API_KEY": "test"}), patch.object(fred, "ensure_db_schema"), patch.object(fred, "fetch_json", side_effect=down) as fetch:
+                summary = fred.run(args)
+            saved = json.loads((Path(tmp) / "state" / "fred.json").read_text(encoding="utf-8"))["series"]
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual((summary["processed"], summary["failed"], summary["unavailable"]), (0, 3, str(down)))
+        self.assertEqual([saved[s]["status"] for s in args.series], ["failed"] * 3)
+        self.assertEqual(saved["VIXCLS"]["error"], f"not requested: {down}")
 
     @unittest.skipIf(not HAS_DUCKDB, "duckdb dependency is not installed")
     def test_first_seen_at_survives_revisions(self) -> None:

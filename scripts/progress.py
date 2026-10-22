@@ -13,7 +13,7 @@ import json
 import os
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +33,8 @@ PROC_ROOT      = Path("/proc")
 # ── 상수 ──────────────────────────────────────────────────────────────────────
 BAR_WIDTH       = 38
 REFRESH_SEC     = 60
+FAILED_STATUSES = ("failed", "not_found")   # not_found: 404·Data not found(30일 뒤 재시도)
+RECENT_FAILURE_WINDOW = timedelta(hours=24)  # 실행이 UTC 자정을 넘어도 그 실행의 실패가 보이게
 
 # run_daily.sh 단계 모듈 → 표시 이름 (src.discord_status는 단계가 아니라 제외)
 STAGE_NAMES = {
@@ -378,24 +380,31 @@ def render_pipeline_stage() -> None:
 
 
 # ── 최근 실패 심볼 ─────────────────────────────────────────────────────────────
-def recent_failures(state: dict, n: int = 5) -> list[str]:
+def recent_failures(state: dict, n: int = 5, now: datetime | None = None) -> list[str]:
+    """최근 24시간 안에 실패한(not_found 포함) 종목, 최신순. 날짜까지 보여 지난 실패와 헷갈리지 않게 한다."""
+    cutoff = (now or datetime.now(UTC)) - RECENT_FAILURE_WINDOW
     symbols = state.get("symbols", {})
     failed = []
     for sym, data in symbols.items():
         if not isinstance(data, dict):
             continue
         td = data.get("twelve_data", {})
-        if isinstance(td, dict) and td.get("status") == "failed":
-            err = td.get("error", "")[:40]
-            updated = fmt_time(td.get("updated_at", ""))
-            failed.append((updated, sym, err))
+        if not isinstance(td, dict) or td.get("status") not in FAILED_STATUSES:
+            continue
+        updated = parse_iso(td.get("updated_at"))
+        if updated is None or updated < cutoff:
+            continue
+        failed.append((updated, sym, str(td.get("error") or "")[:40]))
     failed.sort(reverse=True)
-    return [f"  {c(C.DIM, t)}  {c(C.BRED, s):<12}  {c(C.DIM, e)}" for t, s, e in failed[:n]]
+    return [f"  {c(C.DIM, t.astimezone().strftime('%m-%d %H:%M'))}  {c(C.BRED, s):<12}  {c(C.DIM, e)}"
+            for t, s, e in failed[:n]]
 
 
 # ── 오늘 통계 ─────────────────────────────────────────────────────────────────
 def today_stats(state: dict) -> tuple[int, int, int]:
     # state.json의 날짜는 UTC 기준이다(한국 시간 00:00~09:00에도 맞게 센다).
+    # 실패·건너뜀은 updated_at이 오늘(UTC)인 것만 센다. 상태값은 다음 시도까지 남으므로
+    # 날짜를 보지 않으면 몇 달 전 실패가 오늘 실패로 보인다.
     today = datetime.now(UTC).date().isoformat()
     symbols = state.get("symbols", {})
     done = failed = skipped = 0
@@ -407,7 +416,11 @@ def today_stats(state: dict) -> tuple[int, int, int]:
             continue
         if td.get("last_success_date") == today:
             done += 1
-        elif td.get("status") == "failed":
+            continue
+        updated = parse_iso(td.get("updated_at"))
+        if updated is None or updated.astimezone(UTC).date().isoformat() != today:
+            continue
+        if td.get("status") in FAILED_STATUSES:
             failed += 1
         elif td.get("status") == "skipped_rate_limit":
             skipped += 1
@@ -520,7 +533,7 @@ def render(state: dict | None, limits: dict[str, int]) -> None:
     fails = recent_failures(state)
     if fails:
         print()
-        print(c(C.DIM, "  ── 최근 실패 심볼 (최대 5개) ──────────────────"))
+        print(c(C.DIM, "  ── 최근 24시간 실패 심볼 (최대 5개) ───────────"))
         for line in fails:
             print(line)
 

@@ -33,6 +33,7 @@
   - `macro.first_seen_at`은 그 관측값을 처음 받은 시각이고 값이 수정돼도 유지됩니다.
   - BAA10Y(Moody's), VIXCLS(Cboe)는 설명에 복제·저장 제한 문구가 있어 `series_meta.personal_use_only`로 표시합니다. 개인 연구용으로만 쓰고 `src.export_dataset`은 기본으로 제외합니다.
   - IR3TIB01KRM156N은 한국 월간 3개월 금리이고 관측일 대비 약 44일 뒤 공개됩니다.
+  - 점검 중에는 오류 코드 없이 HTTP 200과 HTML 점검 페이지("Site Maintenance | St. Louis Fed")를 돌려줍니다(2026-10-21 23:06 UTC에 시작해 10-22 02:26 UTC에도 계속). `src.fred`는 이를 `FredUnavailable`(상태 코드·Content-Type·페이지 제목)로 기록하고 남은 시리즈는 요청하지 않습니다. 관측값은 매번 전체 이력을 받으므로 다음 성공 실행에서 빠진 날이 채워집니다.
 
 ## Alpha Vantage
 - **역할**: 보수적 백업 OHLCV(`src.alpha_vantage`), `run_daily.sh`에서 기본 꺼짐.

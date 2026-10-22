@@ -100,6 +100,10 @@
 - [x] 운영 반영(2026-10-21 15:05~15:08 KST, 수집 대기 중): 운영 폴더 `main` fast-forward(ae4dc9d → 73636d7) → `src.rebuild --to-v4`: 2,273MB → 1,120MB, 22.9초(검증 4.7초), 최대 RSS 2.16GB(`systemd-run MemoryMax=5G`). 독립 스크립트 비교에서 테이블 행 수, 뷰 5개 열·타입·체크섬(`prices_daily` 10,158,942행), NVDA·AAPL 분할 이벤트가 변환 전과 같음 → `src.snapshot --phase full`(스냅숏도 버전 4, 상태는 변환 전과 같은 `partial`: 핵심 524/526, 분할 이력 348, 누락 PSKY·WBD)
 - [ ] 변환 백업(`data/db/market.db.bak-2026-10-21`, 2.27GB) 2026-10-28쯤 운영 확인 후 삭제
 
+## 2026-10-22 두 번째 타이머 실행 후속 수정
+- [x] `src.fred`: FRED 점검 중 응답(HTTP 200 + HTML "Site Maintenance | St. Louis Fed")에 16개 시리즈가 모두 `Expecting value: line 1 column 1 (char 0)`으로 실패하던 것을, JSON이 아닌 응답이면 `FredUnavailable`(HTTP 상태·Content-Type·HTML 제목)로 기록하도록 수정. 한 번 만나면 남은 시리즈는 요청하지 않고 `not requested: ...`로 실패 기록, 결과 JSON에 `unavailable`. 단계 종료 코드 1과 완료 판정(`missing_series`)은 그대로
+- [x] `scripts/progress.py`: "오늘(UTC)" 실패·건너뜀 수를 `updated_at`이 오늘(UTC)인 종목만 세도록 수정(2026-06-25 실패 15개가 오늘 실패로 보이던 문제), `not_found`도 실패로 셈. 최근 실패 목록은 최근 24시간 안의 실패(`not_found` 포함)를 날짜와 함께 최신순으로 표시(전에는 날짜 없이 시각 문자열로 정렬). 상태 파일 형식은 그대로
+
 ## 이전 다음 작업
 - [x] run_daily.sh에 DuckDB 검증 단계 포함
 - [x] Pi 배포 스크립트(install_pi.sh) 및 배포 가이드(DEPLOYMENT.md) 추가 → 2026-10-20 `install_local.sh`로 교체
