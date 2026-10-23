@@ -1,0 +1,3 @@
+# Trading days with no bar from any source: SYMBOL YYYY-MM-DD reason.
+# src.validate_duckdb does not warn about these (src.data_rules).
+FISV 2025-11-12 missing in Twelve Data and Yahoo (checked 2026-10-23), around the FI to FISV ticker change

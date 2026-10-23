@@ -174,16 +174,8 @@ if [[ "$RUN_FINNHUB" == "1" ]]; then
   run_stage finnhub_news "$PYTHON_BIN" -m src.finnhub_news "${finnhub_args[@]}" "${maybe_dry_run_args[@]}"
 fi
 
-if [[ "$RUN_SUMMARY" == "1" ]]; then
-  log_step "Generating daily summary"
-  update_discord_status --status "요약 생성 중" --current-symbol "summary"
-  summary_args=()
-  if [[ "$SEND_DISCORD" == "1" ]]; then
-    summary_args=(--send-discord)
-  fi
-  run_stage summary "$PYTHON_BIN" -m src.summary "${summary_args[@]}"
-fi
-
+# Validation runs before the summary so the summary can report this run's result; the summary
+# shows validation=N/A when the report is not from this run (skipped in dry-run, or failed).
 if [[ "$RUN_DUCKDB_VALIDATE" == "1" ]]; then
   if [[ "$DRY_RUN" == "1" ]]; then
     log_step "Skipping DuckDB validation (DRY_RUN=1)"
@@ -192,6 +184,16 @@ if [[ "$RUN_DUCKDB_VALIDATE" == "1" ]]; then
     update_discord_status --status "검증 중" --current-symbol "validate_duckdb"
     run_stage validate_duckdb "$PYTHON_BIN" -m src.validate_duckdb
   fi
+fi
+
+if [[ "$RUN_SUMMARY" == "1" ]]; then
+  log_step "Generating daily summary"
+  update_discord_status --status "요약 생성 중" --current-symbol "summary"
+  summary_args=()
+  if [[ "$SEND_DISCORD" == "1" ]]; then
+    summary_args=(--send-discord)
+  fi
+  run_stage summary "$PYTHON_BIN" -m src.summary "${summary_args[@]}"
 fi
 
 if [[ "$RUN_DB_REBUILD" == "1" ]]; then

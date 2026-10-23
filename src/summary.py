@@ -64,10 +64,20 @@ def _db_file_sizes(data_dir: Path)->dict[str,object]:
     paths={"market_db_bytes": get_db_path(data_dir), "snapshot_bytes": get_snapshot_path(data_dir)}
     return {k:(p.stat().st_size if p.exists() else None) for k,p in paths.items()}
 
-def build_summary(data_dir: Path)->dict[str,object]:
+def read_validation(data_dir: Path, run_id: str | None)->dict[str,object] | None:
+    """This run's src.validate_duckdb result; None when the report is missing or from another run (e.g. skipped in dry-run)."""
+    path=data_dir/"logs"/"validation"/"duckdb_latest.json"
+    if not run_id or not path.exists(): return None
+    try: report=json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError): return None
+    if not isinstance(report,dict) or report.get('run_id')!=run_id: return None
+    warnings={w['type']:w['count'] for w in report.get('warnings') or [] if isinstance(w,dict) and 'type' in w}
+    return {"status": report.get('status'),"issue_count": report.get('issue_count'),"warning_count": report.get('warning_count'),"warnings": warnings,"generated_at": report.get('generated_at')}
+
+def build_summary(data_dir: Path, run_id: str | None = None)->dict[str,object]:
     ensure_data_dirs(data_dir); (data_dir/"logs"/"daily").mkdir(parents=True,exist_ok=True)
     raw_json_count=sum(1 for i in (data_dir/"raw").glob("**/*.json*") if i.is_file())
-    return {"generated_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace('+00:00','Z'),"date": utc_today(),"state": read_state_summary(data_dir),"files": {"raw_json_count": raw_json_count,"db": _db_counts(data_dir),"db_files": _db_file_sizes(data_dir)},"hardware": {"disk": read_disk_summary(data_dir),"cpu_temp_c": read_cpu_temp_c()}}
+    return {"generated_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace('+00:00','Z'),"date": utc_today(),"state": read_state_summary(data_dir),"files": {"raw_json_count": raw_json_count,"db": _db_counts(data_dir),"db_files": _db_file_sizes(data_dir)},"validation": read_validation(data_dir, run_id),"hardware": {"disk": read_disk_summary(data_dir),"cpu_temp_c": read_cpu_temp_c()}}
 
 def save_summary(path:Path, summary:dict[str,object])->Path:
     return atomic_write_json(path, summary)
@@ -76,7 +86,9 @@ def format_discord_message(summary:dict[str,object])->str:
     t=summary['files']['db']['tables']; d=summary['hardware']['disk']; r=summary['files']['db'].get('last_collection_run') or {}
     run=f"\nrun={r.get('status')} session={r.get('session_date')} core={r.get('core_ok')}/{r.get('core_expected')} fred={r.get('fred_ok')}/{r.get('fred_expected')}" if r else ""
     sizes=summary['files'].get('db_files') or {}; mb=lambda b: "-" if b is None else round(b/1e6)
-    return f"[data-scrapping] {summary['date']} summary\nraw_json={summary['files']['raw_json_count']} ohlcv={t['ohlcv']} indicators={t['indicators']} macro={t['macro']} news={t['news']}{run}\ndb_mb={mb(sizes.get('market_db_bytes'))} snapshot_mb={mb(sizes.get('snapshot_bytes'))} disk_free_gb={d['free_gb']} cpu_temp_c={summary['hardware']['cpu_temp_c']}"
+    v=summary.get('validation'); counts=",".join(f"{k}:{n}" for k,n in sorted(((v or {}).get('warnings') or {}).items()))
+    check=f"\nvalidation={v.get('status')} warnings={counts or 0}" if v else "\nvalidation=N/A"
+    return f"[data-scrapping] {summary['date']} summary\nraw_json={summary['files']['raw_json_count']} ohlcv={t['ohlcv']} indicators={t['indicators']} macro={t['macro']} news={t['news']}{run}{check}\ndb_mb={mb(sizes.get('market_db_bytes'))} snapshot_mb={mb(sizes.get('snapshot_bytes'))} disk_free_gb={d['free_gb']} cpu_temp_c={summary['hardware']['cpu_temp_c']}"
 
 def send_discord(url:str,msg:str)->None:
     req=Request(
@@ -91,7 +103,7 @@ def main()->int:
     load_project_env(ROOT)
     a=parse_args()
     try:
-        with pipeline_lock(a.data_dir): s=build_summary(a.data_dir)
+        with pipeline_lock(a.data_dir): s=build_summary(a.data_dir, os.environ.get("DATA_SCRAPPING_RUN_ID"))
     except LockHeldError as exc:
         return lock_held_exit(exc)
     # Saved before the optional Discord message so a webhook failure never loses the summary file.

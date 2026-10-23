@@ -13,7 +13,8 @@ The design, budgets, and the stockpred data contract are in [`docs/DESIGN.md`](d
 - Weekly universe refresh (`src.universe`, sooner when the NASDAQ list is missing or empty): S&P 500 membership from the same public CSV stockpred uses, the NASDAQ list from Twelve Data, and delisted marks for symbols absent from Twelve Data's US catalogs (their rows are kept; they are no longer requested).
 - Twelve Data daily OHLCV with per-symbol full replacement (old split basis rows never linger), `adj_close` (dividend-adjusted close) for core symbols, and split events derived from raw vs split-adjusted prices.
 - Credit-based budgets: per-key daily budgets with reserve, a per-run credit cap, server-side usage sync (`/api_usage`), UTC day rollover during a run, and sequential multi-key rotation.
-- Session awareness: bars of an unfinished session are never stored; NYSE holidays are handled.
+- Session awareness: bars of an unfinished session are never stored; NYSE holidays and one-off closures are handled.
+- Data rules (`src.data_rules`): bars on closed days and before a symbol's first valid date (`config/history_start.txt`) are dropped, verified bars missing from Twelve Data are inserted (`config/bar_patches.csv`), and stored dates that vanish from a response are reported. `src.ohlcv_cleanup` applies the same rules to rows already stored. Validation warns about core gaps not listed in `config/known_gaps.txt`, stale core symbols, closed-day bars, and unapplied patches.
 - Completion record (`collection_runs`, `symbol_status`) and an atomically replaced snapshot for readers.
 - DuckDB schema version 4: `ohlcv`/`indicators` store DATE/DOUBLE/BIGINT values (about half the size of the VARCHAR version 3). Bars are validated in Python before writing; a malformed value fails only that symbol. Typed view names, columns, and types are unchanged.
 - `market.db` rebuild (`src.rebuild`): the one-off v3 → v4 conversion, and a periodic rebuild into a new file when `market.db` grows past twice its size right after the last rebuild (deleted rows of daily full replacement are never reclaimed in place). Verified against the original before an atomic swap; the original is kept as a hard-linked backup.
@@ -29,9 +30,12 @@ The design, budgets, and the stockpred data contract are in [`docs/DESIGN.md`](d
 
 ```text
 config/
+  bar_patches.csv      ← verified bars missing from Twelve Data (src.data_rules)
   core_etfs.txt        ← core ETFs (tracked)
   core_extra.txt       ← optional extra core symbols (create when needed)
   fred_series.txt
+  history_start.txt    ← first valid bar date per symbol (src.data_rules)
+  known_gaps.txt       ← trading days no source has; not reported by validation
   providers.yaml
   symbols.txt          ← NASDAQ list written by the universe refresh (gitignored)
   symbols.txt.example
@@ -45,9 +49,9 @@ docs/
 scripts/
   install_local.sh  lib_env.sh  progress.py  rclone_backup.sh  run_daily.sh
 src/
-  alpha_vantage.py  atomic_io.py  catalog.py  config.py  corporate_actions.py  discord_status.py  env.py
+  alpha_vantage.py  atomic_io.py  catalog.py  config.py  corporate_actions.py  data_rules.py  discord_status.py  env.py
   export_dataset.py  fetch_tickers.py  finnhub_news.py  fred.py  indicators.py
-  lock.py  logging_utils.py  main.py  market_calendar.py  rate_limit.py  rebuild.py
+  lock.py  logging_utils.py  main.py  market_calendar.py  ohlcv_cleanup.py  rate_limit.py  rebuild.py
   scheduling.py  snapshot.py  state.py  storage.py  summary.py  twelve_data.py
   universe.py  validate.py  validate_duckdb.py
 systemd/
@@ -79,7 +83,7 @@ DRY_RUN=1 scripts/run_daily.sh   # plan only: no collection API calls, no state/
 scripts/run_daily.sh             # real run (the timer does this at 16:10 New York time)
 ```
 
-Stages: universe refresh (weekly) → Twelve Data core → FRED → core snapshot → Twelve Data rotation → indicators → Finnhub news → summary → DuckDB validation → `market.db` rebuild (only past twice the size after the last rebuild) → full snapshot → optional backup. A failing stage is reported and the remaining stages still run; the script exits non-zero at the end if any stage failed. A failed Discord status update (`SEND_DISCORD=1`) is logged and never stops the run.
+Stages: universe refresh (weekly) → Twelve Data core → FRED → core snapshot → Twelve Data rotation → indicators → Finnhub news → DuckDB validation → summary (with this run's validation result) → `market.db` rebuild (only past twice the size after the last rebuild) → full snapshot → optional backup. A failing stage is reported and the remaining stages still run; the script exits non-zero at the end if any stage failed. A failed Discord status update (`SEND_DISCORD=1`) is logged and never stops the run.
 
 ## Individual collectors
 
@@ -125,7 +129,8 @@ Output in `data/datasets/<name>/`: Parquet features/labels, chat-format JSONL, a
 ```bash
 .venv/bin/python scripts/progress.py          # live progress (running stage, core completion, news progress, key budgets)
 .venv/bin/python -m src.summary               # data/logs/daily/<date>.json (table counts, DB and snapshot file sizes, disk, CPU temperature)
-.venv/bin/python -m src.validate_duckdb       # data/logs/validation/duckdb_latest.json
+.venv/bin/python -m src.validate_duckdb       # data/logs/validation/duckdb_latest.json (issues + data-rule warnings)
+.venv/bin/python -m src.ohlcv_cleanup --dry-run   # stored rows the data rules reject (writes nothing)
 .venv/bin/python -m src.rebuild --if-needed --dry-run   # market.db size vs. the rebuild threshold (writes nothing)
 journalctl --user -u data-scrapping -n 200 --no-pager
 ```

@@ -44,6 +44,18 @@ DRY_RUN=1 scripts/run_daily.sh
 .venv/bin/python scripts/progress.py --once
 ```
 
+## 데이터 규칙 파일을 바꿀 때
+
+`config/history_start.txt`, `config/bar_patches.csv`, `config/known_gaps.txt`는 git으로 추적합니다(형식은 각 파일 머리 주석, 규칙은 `docs/DESIGN.md` 3절). 코드처럼 worktree에서 고치고 테스트(`tests/test_data_rules.py`가 저장소 파일을 읽어 검사)를 통과한 뒤 반영합니다. 잘못된 줄이 있으면 수집 단계가 API를 부르기 전에 `data_rules_invalid`로 멈춥니다.
+
+- 새 빈칸이 검증 `core_gap` 경고로 나오면: 두 번째 출처(Yahoo 등)에 값이 있으면 `bar_patches.csv`, 없으면 `known_gaps.txt`에 이유와 함께 적습니다.
+- 시작일을 추가했거나, 다시 받지 않는 상장폐지 종목의 행을 바로 정리하려면 수집이 돌지 않을 때 실행합니다(파이프라인 잠금 사용). 영향받은 종목의 지표는 다음 실행의 지표 단계가 다시 계산합니다.
+
+```bash
+.venv/bin/python -m src.ohlcv_cleanup --dry-run   # 지울 행 개수만
+.venv/bin/python -m src.ohlcv_cleanup
+```
+
 ## systemd 사용자 유닛 명령
 
 ```bash

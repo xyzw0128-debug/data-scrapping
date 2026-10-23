@@ -14,6 +14,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from src.config import ProviderConfig, load_provider_config, load_symbols
+from src.data_rules import DataRules, load_data_rules
 from src.env import load_project_env
 from src.lock import LockHeldError, lock_held_exit, pipeline_lock
 from src.rate_limit import KeyPool, PerMinuteRateLimiter
@@ -30,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Collect conservative Alpha Vantage daily OHLCV backup data.")
     parser.add_argument("--provider", default="alpha_vantage")
     parser.add_argument("--symbols", type=Path, default=ROOT / "config" / "symbols.txt")
+    parser.add_argument("--config-dir", type=Path, default=ROOT / "config", help="Data rules (src.data_rules)")
     parser.add_argument("--providers", type=Path, default=ROOT / "config" / "providers.yaml")
     parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
     parser.add_argument("--state", type=Path, default=ROOT / "data" / "state" / "state.json")
@@ -99,13 +101,14 @@ def collect_symbol(
     api_key: str,
     dry_run: bool,
     rate_limiter: PerMinuteRateLimiter | None = None,
+    rules: DataRules | None = None,
 ) -> tuple[str, int, str | None]:
-    """Collect one symbol from Alpha Vantage."""
+    """Collect one symbol from Alpha Vantage (bars the data rules reject are not stored)."""
     if dry_run:
         return "dry_run", 0, None
     payload = fetch_json(build_alpha_vantage_url(config, symbol, api_key), rate_limiter=rate_limiter)
     raw_path = save_raw_json(data_dir, config.name, symbol, payload)
-    rows = normalize_alpha_vantage_ohlcv(payload)
+    rows, _ = (rules or DataRules()).filter_rows(symbol, normalize_alpha_vantage_ohlcv(payload))
     if not rows:
         raise ValueError("No Alpha Vantage OHLCV rows found in response")
     db_path = upsert_ohlcv_db(data_dir, symbol, rows)
@@ -116,6 +119,7 @@ def run(args: argparse.Namespace) -> dict:
     ensure_data_dirs(args.data_dir)
     verify_writable(args.data_dir / "state")
 
+    rules = load_data_rules(args.config_dir)
     config = load_provider_config(args.providers, args.provider)
     symbols = load_symbols(args.symbols)
     max_symbols = args.max_symbols if args.max_symbols is not None else config.max_symbols_per_run
@@ -147,7 +151,7 @@ def run(args: argparse.Namespace) -> dict:
             break
         try:
             status, row_count, note = collect_symbol(
-                config, args.data_dir, symbol, slot.api_key if slot else "", args.dry_run, rate_limiter,
+                config, args.data_dir, symbol, slot.api_key if slot else "", args.dry_run, rate_limiter, rules,
             )
             if slot is not None:
                 slot.budget.spend(1)

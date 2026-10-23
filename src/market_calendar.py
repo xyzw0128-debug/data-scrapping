@@ -10,6 +10,16 @@ from zoneinfo import ZoneInfo
 NEW_YORK = ZoneInfo("America/New_York")
 # Regular close is 16:00 ET; bars are treated as final ten minutes later.
 SESSION_FINAL_TIME = time(16, 10)
+# One-off full-day NYSE closures since 1995 (stored history starts 1995-10-31). A future
+# closure has to be added here, or that day is expected to have a bar.
+SPECIAL_CLOSURES = frozenset({
+    date(2001, 9, 11), date(2001, 9, 12), date(2001, 9, 13), date(2001, 9, 14),  # September 11 attacks
+    date(2004, 6, 11),  # President Reagan's funeral
+    date(2007, 1, 2),  # President Ford's funeral
+    date(2012, 10, 29), date(2012, 10, 30),  # Hurricane Sandy
+    date(2018, 12, 5),  # President George H. W. Bush's funeral
+    date(2025, 1, 9),  # President Carter's funeral
+})
 
 
 def _easter(year: int) -> date:
@@ -48,7 +58,7 @@ def _observed(day: date) -> date:
 
 @lru_cache(maxsize=None)
 def nyse_holidays(year: int) -> frozenset[date]:
-    """Regular NYSE full-day holidays. One-off closures (e.g. national mourning) are not included."""
+    """Regular NYSE full-day holidays. One-off closures are in SPECIAL_CLOSURES."""
     holidays = set()
     new_year = date(year, 1, 1)
     if new_year.weekday() == 6:
@@ -69,7 +79,18 @@ def nyse_holidays(year: int) -> frozenset[date]:
 
 
 def is_trading_day(day: date) -> bool:
-    return day.weekday() < 5 and day not in nyse_holidays(day.year)
+    return day.weekday() < 5 and day not in nyse_holidays(day.year) and day not in SPECIAL_CLOSURES
+
+
+def trading_days(start: date, end: date) -> list[date]:
+    """Every trading day from start to end, both included."""
+    days = []
+    current = start
+    while current <= end:
+        if is_trading_day(current):
+            days.append(current)
+        current += timedelta(days=1)
+    return days
 
 
 def previous_trading_day(day: date) -> date:

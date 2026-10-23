@@ -109,6 +109,19 @@
 - [x] 2100(키 3개 전부)은 보류: 겨울(21:10 UTC 시작)에는 자정 전에 약 1,190크레딧만 쓸 수 있어 나머지가 다음 날 키 예산에서 빠지고, 다음 날 핵심 단계(약 1,055) 여유가 약 130으로 줄어듦(1800이면 약 470)
 - [ ] 표준시 전환(2026-11-02 첫 실행) 뒤 핵심 단계가 키 예산에 막히지 않는지 확인
 
+## 2026-10-23 데이터 규칙: 휴장일 봉·시작일·보정·빠진 날 감지 (`docs/DESIGN.md` 3·4절)
+- [x] 점검(2026-10-23 전체 스냅숏, 읽기 전용): 정기 휴장일·주말 봉 2,903개(349종목, 핵심 8개)와 일회성 휴장일 봉 53개, GM 2010-11-18 이전 옛 회사 391행(거래량 0), 핵심 종목 하루 빈칸 MNST 2026-08-10(Yahoo에 있음)·FISV 2025-11-12(Yahoo에도 없음). 모두 Twelve Data 원본 응답 그대로(수집기는 매번 전체 이력을 교체하므로 수집을 빠뜨려 생긴 빈칸이 아님). 핵심 524종목 Yahoo 시작일 대조에서 GM만 7일 넘게 먼저 시작
+- [x] `src.market_calendar`: 일회성 휴장일 `SPECIAL_CLOSURES` 10일(2001-09-11~14, 2004-06-11, 2007-01-02, 2012-10-29·30, 2018-12-05, 2025-01-09)을 `is_trading_day`·`expected_session`에 반영, `trading_days`
+- [x] `src.data_rules` + `config/history_start.txt`(GM 2010-11-18)·`config/bar_patches.csv`(MNST 2026-08-10, Yahoo 값, 참조일 2026-08-11 45.53)·`config/known_gaps.txt`(FISV 2025-11-12). 규칙 파일은 `/api_usage`보다 먼저(dry-run 포함) 읽고 잘못된 줄이면 API 호출 없이 `data_rules_invalid`(종료 코드 1)
+- [x] `src.main`: 핵심·순환 저장 직전에 휴장일·시작일 이전 봉 제거, 보정 삽입(splits 기준, `adj_close`는 all 값 또는 참조일 비율, 계산 불가면 건너뜀, 분할 뒤 배율 보정, none에는 넣지 않음), 사라진 날짜 감지(핵심 WARNING, 순환 개수). 실행 요약에 `data_rules`, 단계별 `dropped_bars`·`patched`·`vanished_dates`, 종목별 상세. 추가 API 호출·크레딧 없음, 상태 파일 형식 그대로. Alpha Vantage 저장에도 같은 필터
+- [x] `src.validate_duckdb`: `warnings`(`core_gap`·`core_stale`·`closed_day_bars`·`before_history_start`·`patch_missing`), `warning_count`, `generated_at`, `run_id`. 경고는 `status`를 바꾸지 않음. `run_daily.sh`는 검증을 요약 앞에서 실행하고, `src.summary`는 이번 실행의 보고서일 때만 Discord에 `validation=... warnings=...`, 아니면 `validation=N/A`
+- [x] `src.ohlcv_cleanup`: 저장된 휴장일·시작일 이전 행 정리(파이프라인 잠금, `--dry-run`, 한 트랜잭션, 영향 종목 `indicators` 삭제로 재계산 유도, 실패 시 롤백)
+- [x] 테스트 105개 통과(일회성 휴장일 10일 판정, 규칙 파일 거부 22가지, 설정 오류 시 API·클라이언트 0회, splits·all 존재 조합별 보정, 분할 뒤 배율, 보정 후 분할 이벤트 동일, 저장된 적 없는 중간·최신 누락 경고, 정리 dry-run 무변경·롤백·잠금 종료 코드 2, 요약 `N/A`)
+- [x] 리허설(운영 스냅숏 사본, NVMe, `systemd-run MemoryMax=4G`): 검증 1.6초·RSS 638MB에서 경고가 예측과 같음(`core_gap` 0, `core_stale` PSKY·WBD, 휴장일 2,956, GM 391, `patch_missing` MNST) → 정리 dry-run 0.7초, 실제 6.8초·RSS 453MB, 3,347행(350종목) 삭제·지표 946,986행 삭제, 파일 1,458 → 1,601MB → 다시 검증하면 `core_stale` 2·`patch_missing` 1만 남음 → 2026-10-23 원본 응답으로 핵심 526종목 수집 재현(140초, RSS 168MB): 실패 0, 휴장일 8·GM 391행 제거, MNST 2026-08-10 보정(종가·adj_close 45.715, 거래량 11,943,600), 사라진 날짜 0(오탐 없음), GM 첫 봉 2010-11-18, MNST 분할 기록 그대로 → 검증 경고는 `core_stale` PSKY·WBD만. `run_daily.sh` dry-run(빈 데이터, worktree)에서 검증 건너뜀 → 요약 `validation=N/A` 확인
+- [ ] 운영 반영 뒤 첫 실행 확인: `core_gap` 0, 휴장일 봉 0, GM 첫 봉 2010-11-18, MNST 2026-08-10 종가 45.715, Discord 검증 줄
+- [ ] 순환 종목 `vanished_dates`를 1주 지켜보고 계속 셀지 결정
+- 범위 밖: 순환 종목 티커 재사용(61거래일 이상 빈칸 105종목), PSKY·WBD 최신 봉 누락 원인, Alpha Vantage 자동 채움
+
 ## 이전 다음 작업
 - [x] run_daily.sh에 DuckDB 검증 단계 포함
 - [x] Pi 배포 스크립트(install_pi.sh) 및 배포 가이드(DEPLOYMENT.md) 추가 → 2026-10-20 `install_local.sh`로 교체

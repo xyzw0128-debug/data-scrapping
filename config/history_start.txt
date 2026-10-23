@@ -1,0 +1,4 @@
+# First valid bar date per symbol: SYMBOL YYYY-MM-DD reason. Earlier bars are dropped when
+# collected (src.data_rules); src.ohlcv_cleanup removes stored ones at once.
+# Add a symbol only after checking it, e.g. against Yahoo's first date.
+GM 2010-11-18 new GM IPO; Twelve Data rows from 2009-01-21 are the old General Motors (volume 0, close 0.34-3.49), Yahoo starts 2010-11-18

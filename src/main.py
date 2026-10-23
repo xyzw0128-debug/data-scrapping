@@ -9,6 +9,9 @@ Phases (``--phase``):
 
 Every call goes through the key budgets, the per-run credit cap, and the per-minute limit.
 Bars newer than the latest finished session (an unfinished intraday bar) are never stored.
+src.data_rules drops bars on closed days and before a symbol's history start, inserts verified
+patches the response lacks, and finds stored dates that vanished from the new response (core:
+a warning per symbol). The rule files are read before any paid call.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from pathlib import Path
 
 from src.config import load_provider_config
 from src.corporate_actions import split_basis_changed, split_events
+from src.data_rules import DataRules, DataRulesError, load_data_rules
 from src.env import load_project_env
 from src.lock import LockHeldError, lock_held_exit, pipeline_lock
 from src.logging_utils import setup_logging
@@ -93,27 +97,33 @@ def _close_map(rows: list[dict]) -> dict[str, float]:
     return closes
 
 
-def collect_core_symbol(client: TwelveDataClient, data_dir: Path, symbol: str, session: str) -> dict:
+def collect_core_symbol(client: TwelveDataClient, data_dir: Path, symbol: str, session: str, rules: DataRules | None = None) -> dict:
     """Fetch split-adjusted bars and adj_close for one core symbol and replace its rows.
 
     Nothing is written unless both calls succeed, so a failure leaves the old data intact.
     """
+    rules = rules or DataRules()
     if not client.can_afford(CORE_SYMBOL_CREDITS):
         raise BudgetExhaustedError("insufficient_credits_for_core_symbol")
     split_payload = client.time_series(symbol, "splits")
     save_raw_latest(data_dir, f"{PROVIDER}/splits", symbol, split_payload)
-    rows = bars_until(split_payload, session)
+    rows, dropped = rules.filter_rows(symbol, bars_until(split_payload, session))
     if not rows:
         raise ValueError(f"No OHLCV rows on or before {session}")
     all_payload = client.time_series(symbol, "all")
     save_raw_latest(data_dir, f"{PROVIDER}/all", symbol, all_payload)
     adj_closes = {row["date"]: row["close"] for row in bars_until(all_payload, session)}
+    rows, adj_closes, patches = rules.apply_patches(symbol, rows, adj_closes)
 
     stored = load_closes(data_dir, symbol)
     changed = bool(stored) and split_basis_changed(stored, _close_map(rows))
+    vanished = rules.vanished_dates(symbol, stored, rows)
     replace_symbol_prices(data_dir, symbol, rows, adj_closes)
     last_bar = rows[-1]["date"]
-    return {"rows": len(rows), "last_bar_date": last_bar, "adj_ok": last_bar in adj_closes, "split_basis_changed": changed}
+    return {
+        "rows": len(rows), "last_bar_date": last_bar, "adj_ok": last_bar in adj_closes, "split_basis_changed": changed,
+        "dropped": dropped, "patches": patches, "vanished_dates": vanished,
+    }
 
 
 def refresh_split_events(client: TwelveDataClient, data_dir: Path, symbol: str, session: str) -> int:
@@ -126,25 +136,29 @@ def refresh_split_events(client: TwelveDataClient, data_dir: Path, symbol: str, 
     return len(events)
 
 
-def collect_rotation_symbol(client: TwelveDataClient, data_dir: Path, symbol: str, session: str) -> dict:
+def collect_rotation_symbol(client: TwelveDataClient, data_dir: Path, symbol: str, session: str, rules: DataRules | None = None) -> dict:
+    rules = rules or DataRules()
     payload = client.time_series(symbol, "splits")
     save_raw_latest(data_dir, f"{PROVIDER}/splits", symbol, payload)
-    rows = bars_until(payload, session)
+    rows, dropped = rules.filter_rows(symbol, bars_until(payload, session))
     if not rows:
         raise ValueError(f"No OHLCV rows on or before {session}")
+    rows, _, patches = rules.apply_patches(symbol, rows)
+    vanished = rules.vanished_dates(symbol, load_closes(data_dir, symbol), rows)
     replace_symbol_prices(data_dir, symbol, rows)
-    return {"rows": len(rows), "last_bar_date": rows[-1]["date"]}
+    return {"rows": len(rows), "last_bar_date": rows[-1]["date"], "dropped": dropped, "patches": patches, "vanished_dates": vanished}
 
 
 class Run:
     """Mutable bookkeeping for one collector invocation."""
 
-    def __init__(self, args: argparse.Namespace, state: dict, summary: dict, logger: logging.Logger, cap: RunCreditCap):
+    def __init__(self, args: argparse.Namespace, state: dict, summary: dict, logger: logging.Logger, cap: RunCreditCap, rules: DataRules | None = None):
         self.args = args
         self.state = state
         self.summary = summary
         self.logger = logger
         self.cap = cap
+        self.rules = rules or DataRules()
         self.handled = 0
 
     def persist(self, last_symbol: str | None = None) -> None:
@@ -189,12 +203,43 @@ class Run:
         self.summary["skipped_rate_limit"] += 1
         self.logger.warning("Stopping %s at %s: %s", self.summary["current_phase"], symbol, reason)
 
+    def rule_detail(self, bucket: dict, symbol: str, result: dict, warn_vanished: bool) -> dict:
+        """Count the data rules' effects in the phase bucket and return the symbol's non-empty details."""
+        detail: dict = {}
+        dropped = result["dropped"]
+        if dropped:
+            bucket["dropped_bars"] += sum(dropped.values())
+            detail["dropped"] = dropped
+        applied = [item["date"] for item in result["patches"] if item["status"] == "applied"]
+        if applied:
+            bucket["patched"] += len(applied)
+            detail["patched"] = applied
+        skipped = [item for item in result["patches"] if item["status"] != "applied"]
+        for item in skipped:
+            if item["status"] == "provider_has_date":
+                self.logger.info("%s %s: the provider has this bar now; its line in config/bar_patches.csv can go", symbol, item["date"])
+            else:
+                self.logger.warning("Patch %s %s not applied: %s", symbol, item["date"], item["status"])
+        if skipped:
+            detail["patch_skipped"] = skipped
+        vanished = result["vanished_dates"]
+        if vanished:
+            bucket["vanished_dates"] += len(vanished)
+            detail["vanished_dates"] = vanished
+            if warn_vanished:
+                shown = ", ".join(vanished[:10]) + (" ..." if len(vanished) > 10 else "")
+                self.logger.warning("%s: %d stored date(s) missing from the new response: %s", symbol, len(vanished), shown)
+        return detail
+
 
 def run_core(run: Run, client: TwelveDataClient, core: list[str], session: str) -> None:
     args, state = run.args, run.state
     today = utc_today()
     pending = [s for s in core if args.force or provider_entry(state, s, PROVIDER).get("core_session") != session]
-    bucket = run.summary["core"] = {"expected": len(core), "pending": len(pending), "done": 0, "failed": 0, "skipped": 0}
+    bucket = run.summary["core"] = {
+        "expected": len(core), "pending": len(pending), "done": 0, "failed": 0, "skipped": 0,
+        "dropped_bars": 0, "patched": 0, "vanished_dates": 0,
+    }
     run.summary["current_phase"] = "core"
     run.summary["current_planned"] = len(pending)
     if args.dry_run:
@@ -205,7 +250,7 @@ def run_core(run: Run, client: TwelveDataClient, core: list[str], session: str) 
     for symbol in pending:
         entry = provider_entry(state, symbol, PROVIDER)
         try:
-            result = collect_core_symbol(client, args.data_dir, symbol, session)
+            result = collect_core_symbol(client, args.data_dir, symbol, session, run.rules)
         except BudgetExhaustedError as exc:
             run.skip(bucket, entry, symbol, str(exc))
             break
@@ -224,7 +269,7 @@ def run_core(run: Run, client: TwelveDataClient, core: list[str], session: str) 
             if result["split_basis_changed"]:
                 entry["splits_stale"] = True
                 run.logger.info("Split basis changed for %s; split events will be recalculated", symbol)
-            run.ok(bucket, symbol, rows=result["rows"], last_bar_date=result["last_bar_date"])
+            run.ok(bucket, symbol, rows=result["rows"], last_bar_date=result["last_bar_date"], **run.rule_detail(bucket, symbol, result, warn_vanished=True))
         run.tick(symbol)
 
     # Split history: changed basis first, then symbols never checked; only symbols refreshed today.
@@ -262,7 +307,10 @@ def run_rotation(run: Run, client: TwelveDataClient, pool: list[str], exclude: s
     args, state = run.args, run.state
     today = utc_today()
     candidates = choose_rotation_symbols(pool, state, PROVIDER, max_symbols, today, args.force, exclude)
-    bucket = run.summary["rotation"] = {"pool": len(pool), "candidates": len(candidates), "done": 0, "failed": 0, "skipped": 0}
+    bucket = run.summary["rotation"] = {
+        "pool": len(pool), "candidates": len(candidates), "done": 0, "failed": 0, "skipped": 0,
+        "dropped_bars": 0, "patched": 0, "vanished_dates": 0,
+    }
     run.summary["current_phase"] = "rotation"
     run.summary["current_planned"] = len(candidates)
     if args.dry_run:
@@ -273,7 +321,7 @@ def run_rotation(run: Run, client: TwelveDataClient, pool: list[str], exclude: s
     for symbol in candidates:
         entry = provider_entry(state, symbol, PROVIDER)
         try:
-            result = collect_rotation_symbol(client, args.data_dir, symbol, session)
+            result = collect_rotation_symbol(client, args.data_dir, symbol, session, run.rules)
         except BudgetExhaustedError as exc:
             run.skip(bucket, entry, symbol, str(exc))
             break
@@ -281,7 +329,8 @@ def run_rotation(run: Run, client: TwelveDataClient, pool: list[str], exclude: s
             run.fail(bucket, entry, symbol, exc)
         else:
             record_success(entry, today, rows=result["rows"], last_bar_date=result["last_bar_date"], note=None)
-            run.ok(bucket, symbol, rows=result["rows"], last_bar_date=result["last_bar_date"])
+            # Rotation symbols are often thinly traded; their vanished dates are counted, not logged.
+            run.ok(bucket, symbol, rows=result["rows"], last_bar_date=result["last_bar_date"], **run.rule_detail(bucket, symbol, result, warn_vanished=False))
         run.tick(symbol)
 
 
@@ -291,6 +340,8 @@ def run_collection(args: argparse.Namespace, logger: logging.Logger) -> dict:
     verify_writable(args.data_dir / "state")
     if not args.dry_run:
         ensure_db_schema(args.data_dir)  # an unconverted schema stops the run before any paid call
+    # Before the usage sync (/api_usage costs a credit per key), in dry-run too.
+    rules = load_data_rules(args.config_dir)
 
     config = load_provider_config(args.providers, args.provider)
     if config.name != PROVIDER:
@@ -329,9 +380,10 @@ def run_collection(args: argparse.Namespace, logger: logging.Logger) -> dict:
         "failed": 0,
         "skipped_rate_limit": 0,
         "credits": {"cap": cap.limit, "used_before": already_used},
+        "data_rules": {"history_start": len(rules.history_start), "patches": sum(map(len, rules.patches.values())), "known_gaps": len(rules.known_gaps)},
         "symbols": [],
     }
-    run = Run(args, state, summary, logger, cap)
+    run = Run(args, state, summary, logger, cap, rules)
     if not args.dry_run and not args.no_usage_sync:
         summary["usage_sync"] = client.sync_usage()
         if not key_pool.active_slots():
@@ -382,6 +434,10 @@ def main() -> int:
     except LockHeldError as exc:
         logger.error("%s", exc)
         return lock_held_exit(exc)
+    except DataRulesError as exc:
+        logger.error("Data rules are invalid; nothing was collected: %s", exc)
+        print(json.dumps({"status": "data_rules_invalid", "error": str(exc)}, ensure_ascii=False))
+        return 1
 
     printable = {k: v for k, v in summary.items() if k != "symbols"}
     printable["failures"] = [item for item in summary["symbols"] if item["status"] != "done"][:50]

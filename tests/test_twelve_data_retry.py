@@ -233,7 +233,10 @@ class CoreCollectionTest(unittest.TestCase):
             finally:
                 con.close()
 
-        self.assertEqual(result, {"rows": 4, "last_bar_date": "2024-06-11", "adj_ok": True, "split_basis_changed": False})
+        self.assertEqual(result, {
+            "rows": 4, "last_bar_date": "2024-06-11", "adj_ok": True, "split_basis_changed": False,
+            "dropped": {}, "patches": [], "vanished_dates": [],  # 1999-01-04 left the response window: not vanished
+        })
         self.assertEqual([str(d) for d in dates], ["2024-06-06", "2024-06-07", "2024-06-10", "2024-06-11"], "old 1999 row and unfinished bar are gone")
         self.assertEqual(adj, adjusted_all["2024-06-07"])
         self.assertEqual(events, 1)

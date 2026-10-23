@@ -9,7 +9,7 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 from src import finnhub_news, fred
 from src.corporate_actions import snap_ratio, split_basis_changed, split_events
 from src.lock import PIPELINE_LOCK_ENV, LockHeldError, pipeline_lock, pipeline_running
-from src.market_calendar import expected_session, is_trading_day, nyse_holidays
+from src.market_calendar import SPECIAL_CLOSURES, expected_session, is_trading_day, nyse_holidays, previous_trading_day, trading_days
 from src.scheduling import choose_rotation_symbols, record_failure, record_success
 from src.snapshot import create_snapshot, evaluate_completion
 from src.universe import Universe, load_universe, parse_sp500_history, recent_removals, refresh_reason, refresh_universe, universe_path
@@ -70,6 +70,25 @@ class MarketCalendarTest(unittest.TestCase):
         self.assertEqual(expected_session(at(2026, 10, 24, 12, 0)), date(2026, 10, 23), "Saturday: Friday")
         self.assertEqual(expected_session(at(2026, 11, 26, 18, 0)), date(2026, 11, 25), "Thanksgiving: Wednesday")
         self.assertEqual(expected_session(at(2026, 10, 20, 21, 30).astimezone(ZoneInfo("Asia/Seoul"))), date(2026, 10, 20))
+
+    def test_special_closures_are_not_sessions(self) -> None:
+        expected = ["2001-09-11", "2001-09-12", "2001-09-13", "2001-09-14", "2004-06-11", "2007-01-02", "2012-10-29", "2012-10-30", "2018-12-05", "2025-01-09"]
+        self.assertEqual(sorted(d.isoformat() for d in SPECIAL_CLOSURES), expected)
+        for day in SPECIAL_CLOSURES:
+            self.assertLess(day.weekday(), 5, f"{day} is a weekday")
+            self.assertFalse(is_trading_day(day), day)
+            evening = datetime(day.year, day.month, day.day, 18, 0, tzinfo=NY)
+            before = previous_trading_day(day)
+            self.assertNotIn(before, SPECIAL_CLOSURES)
+            self.assertEqual(expected_session(evening), before, f"{day}: the session before the closure")
+            following = day + timedelta(days=1)
+            while not is_trading_day(following):
+                following += timedelta(days=1)
+            self.assertEqual(previous_trading_day(following), before, f"{day} is skipped going back")
+        # September 2001: the market was shut Tuesday-Friday and reopened Monday 2001-09-17.
+        self.assertEqual(expected_session(datetime(2001, 9, 14, 18, 0, tzinfo=NY)), date(2001, 9, 10))
+        self.assertEqual(previous_trading_day(date(2001, 9, 17)), date(2001, 9, 10))
+        self.assertEqual(len(trading_days(date(2025, 1, 6), date(2025, 1, 10))), 4, "2025-01-09 is not counted")
 
 
 class SplitDerivationTest(unittest.TestCase):
