@@ -3,7 +3,7 @@
 ## Twelve Data
 - **역할**: 일봉 OHLCV 기본 수집(`src.main`), 종목 카탈로그(`src.universe`, `src.fetch_tickers`).
 - **무료(Basic) 한도**: 키당 분당 8크레딧, 하루 800크레딧(00:00 UTC 초기화).
-- **이 저장소 설정**(`config/providers.yaml`): `daily_limit: 800`, `daily_reserve: 100`(키당 하루 700 사용), `per_minute_limit: 7`, `max_symbols_per_run: 700`(순환 종목 수), `max_credits_per_run: 1400`(실행당 크레딧 상한), `outputsize: 5000`.
+- **이 저장소 설정**(`config/providers.yaml`): `daily_limit: 800`, `daily_reserve: 100`(키당 하루 700 사용), `per_minute_limit: 7`, `max_symbols_per_run: 700`(순환 종목 수), `max_credits_per_run: 1800`(실행당 크레딧 상한, 순환 700종목에서 먼저 멈춰 보통 약 1,760 사용), `outputsize: 5000`.
 - **크레딧 비용(2026-10-20 `/api_usage` 실측)**: `time_series` 1(5000행도 1), `/api_usage` 1, `/stocks`·`/etfs` 0, 403 응답 0.
 - **무료 키에서 막힌 것**: `/dividends`, `/splits`, `/splits_calendar`, `/dividends_calendar`(403, Grow 이상 전용; `/dividends`는 AAPL만 예외적으로 열림). 대신 `time_series`의 `adjust` 옵션을 씁니다.
   - `adjust=splits`(기본): 분할 반영 OHLCV. Yahoo `Close`와 일치합니다.

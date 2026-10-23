@@ -70,7 +70,7 @@ It creates/uses `.venv`, installs `requirements.txt`, copies `.env.example` to `
 
 `.env` in the project root (gitignored, see `.env.example`) holds API keys and run settings. Every Python CLI, `scripts/run_daily.sh`, and `scripts/rclone_backup.sh` read it; a variable already set in the environment wins.
 
-Provider budgets live in `config/providers.yaml`. Twelve Data: 800 credits/day per key with a 100 reserve, 7 calls/minute, 1400 credits per run (`max_credits_per_run`, overridden by `TWELVE_MAX_CREDITS`).
+Provider budgets live in `config/providers.yaml`. Twelve Data: 800 credits/day per key with a 100 reserve, 7 calls/minute, 1800 credits per run (`max_credits_per_run`, overridden by `TWELVE_MAX_CREDITS`).
 
 ## Daily run
 

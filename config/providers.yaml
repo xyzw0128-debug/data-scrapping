@@ -13,8 +13,9 @@ twelve_data:
   per_minute_limit: 7
   # Rotation symbols per run (core symbols are not limited by this).
   max_symbols_per_run: 700
-  # Credits per pipeline run across core and rotation phases (2 keys of 700 usable credits).
-  max_credits_per_run: 1400
+  # Credits per pipeline run across core and rotation phases (core ~1055 + 700 rotation symbols ~= 1760).
+  # Not 2100 (all 3 keys): credits spent after 00:00 UTC come out of the next day's key budgets.
+  max_credits_per_run: 1800
   base_url: https://api.twelvedata.com/time_series
   interval: 1day
   outputsize: 5000
