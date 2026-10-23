@@ -118,6 +118,7 @@
 - [x] `src.ohlcv_cleanup`: 저장된 휴장일·시작일 이전 행 정리(파이프라인 잠금, `--dry-run`, 한 트랜잭션, 영향 종목 `indicators` 삭제로 재계산 유도, 실패 시 롤백)
 - [x] 테스트 105개 통과(일회성 휴장일 10일 판정, 규칙 파일 거부 22가지, 설정 오류 시 API·클라이언트 0회, splits·all 존재 조합별 보정, 분할 뒤 배율, 보정 후 분할 이벤트 동일, 저장된 적 없는 중간·최신 누락 경고, 정리 dry-run 무변경·롤백·잠금 종료 코드 2, 요약 `N/A`)
 - [x] 리허설(운영 스냅숏 사본, NVMe, `systemd-run MemoryMax=4G`): 검증 1.6초·RSS 638MB에서 경고가 예측과 같음(`core_gap` 0, `core_stale` PSKY·WBD, 휴장일 2,956, GM 391, `patch_missing` MNST) → 정리 dry-run 0.7초, 실제 6.8초·RSS 453MB, 3,347행(350종목) 삭제·지표 946,986행 삭제, 파일 1,458 → 1,601MB → 다시 검증하면 `core_stale` 2·`patch_missing` 1만 남음 → 2026-10-23 원본 응답으로 핵심 526종목 수집 재현(140초, RSS 168MB): 실패 0, 휴장일 8·GM 391행 제거, MNST 2026-08-10 보정(종가·adj_close 45.715, 거래량 11,943,600), 사라진 날짜 0(오탐 없음), GM 첫 봉 2010-11-18, MNST 분할 기록 그대로 → 검증 경고는 `core_stale` PSKY·WBD만. `run_daily.sh` dry-run(빈 데이터, worktree)에서 검증 건너뜀 → 요약 `validation=N/A` 확인
+- [x] 운영 반영(2026-10-23 18:56~18:58 KST, 수집 대기 중): 운영 폴더 `main` fast-forward(5d6b9e0 → 2630ce2) → `SEND_DISCORD=0 RUN_SUMMARY=0 DRY_RUN=1 scripts/run_daily.sh` 실패 단계 없음(규칙 1·1·1 로드) → `src.ohlcv_cleanup --dry-run` 3,347행(휴장일 2,956, GM 391, 350종목) → 실제 6.7초, 지표 946,986행 삭제, `market.db` 1,458 → 1,601MB → `src.validate_duckdb` 경고 `core_stale` PSKY·WBD, `patch_missing` MNST(다음 수집에서 들어감). 스냅숏은 다음 실행이 게시
 - [ ] 운영 반영 뒤 첫 실행 확인: `core_gap` 0, 휴장일 봉 0, GM 첫 봉 2010-11-18, MNST 2026-08-10 종가 45.715, Discord 검증 줄
 - [ ] 순환 종목 `vanished_dates`를 1주 지켜보고 계속 셀지 결정
 - 범위 밖: 순환 종목 티커 재사용(61거래일 이상 빈칸 105종목), PSKY·WBD 최신 봉 누락 원인, Alpha Vantage 자동 채움
