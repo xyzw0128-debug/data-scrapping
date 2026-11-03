@@ -44,7 +44,9 @@ data/
   db/                  ← market.db and market_snapshot.db (gitignored)
   logs/
   raw/                 ← latest raw response per symbol/series (gzip)
-  state/               ← state.json, universe.json, fred.json, finnhub_news.json, db_maintenance.json, pipeline.lock
+  state/               ← state.json, universe.json, fred.json, finnhub_news.json, db_maintenance.json,
+                         discord_status.json, sp500_hist.csv (S&P 500 list cache), pipeline.lock
+  ohlcv/  indicators/  macro/  news/   ← legacy CSV folders, read only by src.validate
 docs/
 scripts/
   install_local.sh  lib_env.sh  progress.py  rclone_backup.sh  run_daily.sh
@@ -60,6 +62,8 @@ systemd/
 tests/
 ```
 
+Kept outside the daily run: `src.validate` (legacy CSV validation; daily validation is `src.validate_duckdb`), `src.fetch_tickers` (manual NASDAQ list fetch; `src.universe` does this weekly), and `src.alpha_vantage` (optional backup collector, see Daily run).
+
 Run the tests with `.venv/bin/python -m unittest discover -s tests`.
 
 ## Install on this PC
@@ -68,7 +72,7 @@ Run the tests with `.venv/bin/python -m unittest discover -s tests`.
 scripts/install_local.sh
 ```
 
-It creates/uses `.venv`, installs `requirements.txt`, copies `.env.example` to `.env` if missing, installs the systemd **user** units to `~/.config/systemd/user`, and enables `data-scrapping.timer`. The backup timer is installed but not enabled (`ENABLE_BACKUP=1` enables it). See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+It creates/uses `.venv` (Python 3.11 or newer), installs `requirements.txt`, copies `.env.example` to `.env` if missing, installs the systemd **user** units to `~/.config/systemd/user`, and enables `data-scrapping.timer` (`ENABLE_TIMER=0` installs the units without enabling them). The backup timer (daily 23:30 New York time) is installed but not enabled (`ENABLE_BACKUP=1` enables it). With user lingering off, the timers run only while you are logged in; `sudo loginctl enable-linger $USER` lifts that. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
 ## Configuration
 
@@ -83,7 +87,7 @@ DRY_RUN=1 scripts/run_daily.sh   # plan only: no collection API calls, no state/
 scripts/run_daily.sh             # real run (the timer does this at 16:10 New York time)
 ```
 
-Stages: universe refresh (weekly) → Twelve Data core → FRED → core snapshot → Twelve Data rotation → indicators → Finnhub news → DuckDB validation → summary (with this run's validation result) → `market.db` rebuild (only past twice the size after the last rebuild) → full snapshot → optional backup. A failing stage is reported and the remaining stages still run; the script exits non-zero at the end if any stage failed. A failed Discord status update (`SEND_DISCORD=1`) is logged and never stops the run.
+Stages: universe refresh (weekly) → Twelve Data core → FRED → core snapshot → Twelve Data rotation → Alpha Vantage (optional) → indicators → Finnhub news → DuckDB validation → summary (with this run's validation result) → `market.db` rebuild (only past twice the size after the last rebuild) → full snapshot → optional backup. Each stage has a `RUN_*` toggle in `.env` (see `.env.example`). Alpha Vantage is off by default (`RUN_ALPHA_VANTAGE=0`): its daily prices are not split-adjusted and go into the same `ohlcv` table, so enabling it mixes price bases. A failing stage is reported and the remaining stages still run; the script exits non-zero at the end if any stage failed. A failed Discord status update (`SEND_DISCORD=1`) is logged and never stops the run.
 
 ## Individual collectors
 
@@ -127,10 +131,12 @@ Output in `data/datasets/<name>/`: Parquet features/labels, chat-format JSONL, a
 ## Monitoring
 
 ```bash
-.venv/bin/python scripts/progress.py          # live progress (running stage, core completion, news progress, key budgets)
+.venv/bin/python scripts/progress.py          # live progress (running stage, core completion, news progress, key budgets), every 60 s
+.venv/bin/python scripts/progress.py --once   # print once (-i 5: refresh every 5 s)
 .venv/bin/python -m src.summary               # data/logs/daily/<date>.json (table counts, DB and snapshot file sizes, disk, CPU temperature)
 .venv/bin/python -m src.validate_duckdb       # data/logs/validation/duckdb_latest.json (issues + data-rule warnings)
 .venv/bin/python -m src.ohlcv_cleanup --dry-run   # stored rows the data rules reject (writes nothing)
+.venv/bin/python -m src.ohlcv_cleanup             # delete them in one transaction; indicators of affected symbols are recalculated next run
 .venv/bin/python -m src.rebuild --if-needed --dry-run   # market.db size vs. the rebuild threshold (writes nothing)
 journalctl --user -u data-scrapping -n 200 --no-pager
 ```
@@ -152,4 +158,4 @@ A successful run does not mean every symbol was collected. A successful run mean
 
 ## Runtime files
 
-Runtime outputs are ignored by git: `data/db/`, `data/raw/`, `data/state/`, `data/logs/`, `data/datasets/`, `config/symbols.txt`, and `.env`.
+Runtime outputs are ignored by git: `data/db/`, `data/raw/`, `data/state/`, `data/logs/`, `data/datasets/`, the legacy `data/ohlcv/`, `data/indicators/`, `data/macro/`, `data/news/`, `config/symbols.txt`, and `.env`.

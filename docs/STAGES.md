@@ -123,6 +123,12 @@
 - [ ] 순환 종목 `vanished_dates`를 1주 지켜보고 계속 셀지 결정
 - 범위 밖: 순환 종목 티커 재사용(61거래일 이상 빈칸 105종목), PSKY·WBD 최신 봉 누락 원인, Alpha Vantage 자동 채움
 
+## 2026-11-03 README를 현재 코드에 맞춰 보완 (문서만)
+- [x] 일일 단계 목록에 선택 단계 Alpha Vantage(기본 꺼짐, 분할 미조정 가격이라 켜면 가격 기준이 섞임)와 `RUN_*` 단계 스위치 안내 추가
+- [x] Layout: `data/state/`의 `discord_status.json`·`sp500_hist.csv`, 옛 CSV 폴더(`data/ohlcv/` 등, `src.validate`만 읽음), 일일 실행 밖 도구(`src.validate`·`src.fetch_tickers`·`src.alpha_vantage`) 설명 추가
+- [x] 설치: Python 3.11 이상, `ENABLE_TIMER=0`, 백업 타이머 시각(매일 23:30 New York), linger 안내 추가
+- [x] Monitoring: `progress.py --once`·`-i`, `src.ohlcv_cleanup` 실제 실행 추가
+
 ## 이전 다음 작업
 - [x] run_daily.sh에 DuckDB 검증 단계 포함
 - [x] Pi 배포 스크립트(install_pi.sh) 및 배포 가이드(DEPLOYMENT.md) 추가 → 2026-10-20 `install_local.sh`로 교체
