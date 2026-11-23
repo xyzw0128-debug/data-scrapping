@@ -75,7 +75,7 @@ systemctl --user disable --now data-scrapping.timer # 자동 실행 끄기
 3. 점검: `RCLONE_DRY_RUN=1 scripts/rclone_backup.sh`
 4. 켜기: `ENABLE_BACKUP=1 scripts/install_local.sh` 또는 `systemctl --user enable --now data-scrapping-backup.timer`
 
-백업 스크립트는 단독으로 실행되면 파이프라인 잠금을 기다렸다가(최대 6시간) 복사하므로 쓰는 도중의 `market.db`를 올리지 않습니다. 백업 타이머(매일 23:30 New York)는 수집 실행(겨울 20:10, 여름 21:10 New York 시작, 약 6시간) 도중에 걸리므로 보통 수집이 끝난 뒤에 복사합니다. `run_daily.sh`의 `RUN_BACKUP=1`로 수집 직후에 돌릴 수도 있습니다. 재구성 임시 파일(`db/.*.tmp`)과 재구성 백업(`db/market.db.bak-*`)은 올리지 않습니다.
+백업 스크립트는 단독으로 실행되면 파이프라인 잠금을 기다렸다가(최대 6시간) 복사하므로 쓰는 도중의 `market.db`를 올리지 않습니다. 백업 타이머(매일 23:30 New York)는 수집 실행(겨울 20:10, 여름 21:10 New York 시작, 약 6시간) 도중에 걸리므로 보통 수집이 끝난 뒤에 복사합니다. `run_daily.sh`의 `RUN_BACKUP=1`로 수집 직후에 돌릴 수도 있습니다. 재구성 임시 파일(`db/.*.tmp`)과 재구성 백업(`db/market.db.bak-*`)은 올리지 않습니다. 2026-10-20 이전 옛 응답 보관 파일(`raw/archive/`, 약 0.19GB)은 올립니다.
 
 ## 스키마 버전 4 변환 (1회)
 
@@ -94,7 +94,7 @@ systemctl --user disable --now data-scrapping.timer # 자동 실행 끄기
 ## 데이터 경로
 
 - 모든 CLI는 `--data-dir`로 데이터 경로를 바꿀 수 있습니다. `run_daily.sh`는 저장소의 `data/`를 씁니다.
-- 디스크 사용량: `market.db` 약 1.1GB(스키마 버전 4. 버전 3은 약 2.3GB), 스냅숏 같은 크기, 원본 응답(gzip, 종목별 최신 1개) 약 0.6GB. 재구성 백업(`market.db.bak-*`)은 재구성이 성공할 때 최신 2개만 남기고 지웁니다(하나에 약 2GB).
+- 디스크 사용량: `market.db` 약 1.1GB(스키마 버전 4. 버전 3은 약 2.3GB), 스냅숏 같은 크기, 원본 응답(gzip, 종목별 최신 1개) 약 0.6GB, 2026-10-20 이전 옛 응답 보관 파일(`raw/archive/twelve_data_legacy_pre_20261020.tar.gz`) 약 0.19GB(`docs/DESIGN.md` 3절). 재구성 백업(`market.db.bak-*`)은 재구성이 성공할 때 최신 2개만 남기고 지웁니다(하나에 약 2GB).
 
 ## 트러블슈팅
 

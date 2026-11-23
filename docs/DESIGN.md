@@ -120,7 +120,7 @@
 - 값 정규화(스키마 버전 4): 저장 전에 Python에서 봉을 검사합니다. 날짜는 `YYYY-MM-DD` 달력 날짜, open/high/low/close는 유한한 실수(빠지면 오류), volume은 0 이상의 정수(`"12345"`, `12345.0`은 허용, `1.5`는 오류, 빈 값은 NULL, 0은 0으로 보존), `adj_close`는 유한한 실수 또는 NULL입니다. 응답에 이상 값이 하나라도 있으면 그 종목만 실패(`ValueError`)로 처리해 기존 실패·재시도 흐름을 타고, 저장된 행은 바뀌지 않습니다. NDJSON에는 JSON 숫자로 쓰고 `read_json`이 테이블 타입으로 읽으므로, 정규화를 빠져나간 `""`·`"abc"`·잘못된 날짜도 DB에 들어가지 않고 오류가 납니다.
 - `delisted` 종목은 다시 받지 않으므로 행이 보존됩니다.
 - dry-run은 `state.json`, `finnhub_news.json`, DB에 아무것도 쓰지 않습니다.
-- 원본 응답은 매일 5000행 전체를 다시 받으므로 응답마다 새 파일을 만들면 하루 1GB가 넘게 쌓입니다. 그래서 `data/raw/twelve_data/{splits,all,none}/<symbol>.json.gz`처럼 종목·조정 방식별 최신 1개만 gzip으로 덮어씁니다(약 0.6GB에서 멈춤). FRED, Finnhub도 같은 방식입니다. 2026-10-20 이전의 타임스탬프 파일(약 1.9GB)은 그대로 둡니다.
+- 원본 응답은 매일 5000행 전체를 다시 받으므로 응답마다 새 파일을 만들면 하루 1GB가 넘게 쌓입니다. 그래서 `data/raw/twelve_data/{splits,all,none}/<symbol>.json.gz`처럼 종목·조정 방식별 최신 1개만 gzip으로 덮어씁니다(약 0.6GB에서 멈춤). FRED, Finnhub도 같은 방식입니다. 2026-10-20 이전에 응답마다 만든 타임스탬프 파일(`data/raw/twelve_data/<symbol>_<UTC 시각>.json`, 5,301개·1.94GB, 2026-05-20~06-25)은 `data/raw/archive/twelve_data_legacy_pre_20261020.tar.gz`(190MB) 하나로 압축 보관합니다(2026-11-24). 압축 안의 경로가 `twelve_data/<파일 이름>`이라 `data/raw`에서 풀면 원래 자리로 돌아오고, 같은 폴더의 `twelve_data_legacy_pre_20261020.files.sha256`(파일별 SHA-256, `data/raw`에서 `sha256sum -c`)과 `.tar.gz.sha256`(압축 파일)으로 확인합니다. 같은 데이터가 DB에 있고 이 파일들을 읽는 코드는 없습니다. 원본은 압축과 대조한 뒤 사용자 확인을 받아 지웁니다. `data/raw/fred/`의 같은 시기 타임스탬프 파일 11개(9.5MB)는 아직 그대로 둡니다.
 - `--only SYMBOL`로 두 단계를 특정 종목에 한정할 수 있습니다(점검, 문제 종목 재수집).
 
 ## 4. 기준 거래일과 완료 상태

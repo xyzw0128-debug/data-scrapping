@@ -43,7 +43,8 @@ data/
   datasets/            ← exported ML datasets (gitignored)
   db/                  ← market.db and market_snapshot.db (gitignored)
   logs/
-  raw/                 ← latest raw response per symbol/series (gzip)
+  raw/                 ← latest raw response per symbol/series (gzip); raw/archive/ keeps the
+                         pre-2026-10-20 timestamped Twelve Data responses as one tar.gz + SHA-256 lists
   state/               ← state.json, universe.json, fred.json, finnhub_news.json, db_maintenance.json,
                          discord_status.json, sp500_hist.csv (S&P 500 list cache), pipeline.lock
   ohlcv/  indicators/  macro/  news/   ← legacy CSV folders, read only by src.validate
