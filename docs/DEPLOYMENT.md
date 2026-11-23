@@ -31,8 +31,10 @@ sudo는 쓰지 않습니다. 수집기는 lael 계정으로 돌기 때문에 데
 
 ## 실행 시각
 
-- `data-scrapping.timer`: `Mon..Fri 16:10 America/New_York`. 서머타임을 자동 반영합니다(겨울 06:10 KST, 여름 05:10 KST).
-- `Persistent=true`: PC가 꺼져 있어 놓친 실행은 켜질 때 바로 돕니다. 그때가 장중이어도 끝나지 않은 당일 봉은 저장하지 않습니다.
+- `data-scrapping.timer`: `Tue..Sat 01:10 UTC`(2026-11-24부터, 전에는 `Mon..Fri 16:10 America/New_York`). New York 월~금 저녁(겨울 20:10, 여름 21:10)이고 KST로는 늘 10:10입니다. 마감 몇 시간 뒤라 기준 거래일 봉의 종가·거래량이 확정값에 가깝고, Twelve Data 단계가 다음 00:00 UTC(키 예산 초기화) 전에 끝납니다(`docs/DESIGN.md` 2·3·4절).
+- `Persistent=true`: PC가 꺼져 있어 놓친 실행은 켜질 때 바로 돕니다. 그때가 장중이어도 끝나지 않은 당일 봉은 저장하지 않습니다. 끝난 기준 거래일 봉도 다음 날까지는 잠정값이며 스냅숏의 `bar_status`에 표시됩니다.
+- 게시 시각(2026-11-03 실행 소요 시간 기준): 핵심 스냅숏 약 03:40 UTC(12:40 KST), 순환 끝 약 05:20 UTC, 전체 스냅숏 약 07:00 UTC(16:00 KST).
+- 타이머 유닛을 바꾼 뒤에는 `ENABLE_TIMER=0 scripts/install_local.sh`(켜지 않고 설치) 또는 `scripts/install_local.sh`(설치하고 켬)로 `~/.config/systemd/user/`의 유닛을 다시 만듭니다. `systemctl --user list-timers 'data-scrapping*' --all`로 다음 실행 시각을 확인합니다.
 - 소요 시간: 핵심 단계 약 2시간 30분(1,052크레딧 ÷ 분당 7회), 순환 단계 약 1시간 40분(700크레딧), 전체 약 6시간(상한 1400이던 2026-10-23 실행은 5시간 3분, 그중 뉴스 1시간 42분. 뉴스 과거분을 채우는 첫 며칠은 더 김).
 
 ## 수동 점검
@@ -73,13 +75,13 @@ systemctl --user disable --now data-scrapping.timer # 자동 실행 끄기
 3. 점검: `RCLONE_DRY_RUN=1 scripts/rclone_backup.sh`
 4. 켜기: `ENABLE_BACKUP=1 scripts/install_local.sh` 또는 `systemctl --user enable --now data-scrapping-backup.timer`
 
-백업 스크립트는 단독으로 실행되면 파이프라인 잠금을 기다렸다가(최대 6시간) 복사하므로 쓰는 도중의 `market.db`를 올리지 않습니다. `run_daily.sh`의 `RUN_BACKUP=1`로 수집 직후에 돌릴 수도 있습니다. 재구성 임시 파일(`db/.*.tmp`)과 재구성 백업(`db/market.db.bak-*`)은 올리지 않습니다.
+백업 스크립트는 단독으로 실행되면 파이프라인 잠금을 기다렸다가(최대 6시간) 복사하므로 쓰는 도중의 `market.db`를 올리지 않습니다. 백업 타이머(매일 23:30 New York)는 수집 실행(겨울 20:10, 여름 21:10 New York 시작, 약 6시간) 도중에 걸리므로 보통 수집이 끝난 뒤에 복사합니다. `run_daily.sh`의 `RUN_BACKUP=1`로 수집 직후에 돌릴 수도 있습니다. 재구성 임시 파일(`db/.*.tmp`)과 재구성 백업(`db/market.db.bak-*`)은 올리지 않습니다.
 
 ## 스키마 버전 4 변환 (1회)
 
 스키마 버전 4 코드는 버전 3 `market.db`에 쓰지 않고 `SchemaVersionError`로 멈춥니다(수집 CLI는 API 호출 전에 확인). 그래서 코드 반영과 변환을 같은 시간대에 이어서 합니다.
 
-1. 수집이 돌지 않는지 확인합니다: `systemctl --user is-active data-scrapping.service`가 `inactive`, `.venv/bin/python scripts/progress.py --once`, 다음 타이머(평일 16:10 New York) 전에 끝낼 시간이 있는지.
+1. 수집이 돌지 않는지 확인합니다: `systemctl --user is-active data-scrapping.service`가 `inactive`, `.venv/bin/python scripts/progress.py --once`, 다음 타이머(화~토 01:10 UTC = 10:10 KST) 전에 끝낼 시간이 있는지.
 2. 운영 폴더에서 `git merge --ff-only <브랜치>`(안 되면 worktree에서 `main`을 병합하고 테스트를 다시 통과시킨 뒤).
 3. 점검: `.venv/bin/python -m src.rebuild --to-v4 --dry-run`(버전 3, 크기, 여유 공간).
 4. 변환: `.venv/bin/python -m src.rebuild --to-v4`. 운영 사본 리허설 기준 약 25초, 최대 RSS 약 2.2GB(`memory_limit` 3GB), 여유 공간은 원본 크기의 1.1배 이상 필요합니다. 출력 JSON의 `status`가 `converted`인지, `checks`의 행 수·뷰 체크섬을 확인합니다.

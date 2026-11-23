@@ -1,9 +1,12 @@
 [Unit]
-Description=Run data-scrapping after the US market close (16:10 New York time, Mon-Fri)
+Description=Run data-scrapping on US trading-day evenings (01:10 UTC Tue-Sat: 20:10 New York in winter, 21:10 in summer)
 
 [Timer]
-# New York time zone: follows US daylight saving (21:10 UTC in winter, 20:10 UTC in summer).
-OnCalendar=Mon..Fri 16:10 America/New_York
+# UTC, not New York time: the Twelve Data stages (about 4 h 10 min) end before the next 00:00 UTC,
+# when the key budgets reset, so no run spends the next day's credits. Tue..Sat 01:10 UTC is the
+# Mon..Fri New York evening, hours after the close: until then the session bar holds Twelve Data's
+# preliminary values (volume about 5% of the market right after the close). See docs/DESIGN.md 2절.
+OnCalendar=Tue..Sat 01:10 UTC
 # A run missed while the PC was off starts at boot; bars of an unfinished session are not stored.
 Persistent=true
 

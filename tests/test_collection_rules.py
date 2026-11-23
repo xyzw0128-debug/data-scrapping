@@ -311,6 +311,55 @@ class CompletionTest(unittest.TestCase):
         self.assertEqual(status, [("core_etf", "SPY", "2026-10-20")])
         self.assertEqual(price, (1.0, 0.99, 0.0, 0.0))
 
+    @unittest.skipIf(not HAS_DUCKDB, "duckdb dependency is not installed")
+    def test_bar_status_flags_last_bars_fetched_before_the_next_day(self) -> None:
+        import duckdb  # type: ignore
+
+        from src.storage import replace_symbol_prices
+
+        def bar(day: str) -> dict:
+            return {"date": day, "open": "1", "high": "1", "low": "1", "close": "1", "volume": "100"}
+
+        # (symbol, stored bars, last_success_at): the last bar is final once the symbol was fetched
+        # at or after 21:10 UTC on the day after it.
+        cases = [
+            ("SPY", ["2026-10-19", "2026-10-20"], "2026-10-20T20:10:04Z"),  # 16:10 New York, same evening
+            ("QQQ", ["2026-10-20"], "2026-10-21T01:10:00Z"),  # timer run, next UTC day
+            ("IWM", ["2026-10-20"], "2026-10-21T21:09:59Z"),
+            ("EFA", ["2026-10-20"], "2026-10-21T21:10:00Z"),
+            ("EEM", ["2026-10-16"], "2026-10-20T20:10:00Z"),  # response ended days ago
+            ("VNQ", ["2026-10-20"], None),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config, data = root / "config", root / "data"
+            config.mkdir()
+            (config / "core_etfs.txt").write_text("".join(f"{symbol}\n" for symbol, _, _ in cases), encoding="utf-8")
+            (config / "fred_series.txt").write_text("", encoding="utf-8")
+            symbols = {}
+            for symbol, days, fetched in cases:
+                replace_symbol_prices(data, symbol, [bar(day) for day in days])
+                symbols[symbol] = {"twelve_data": {"last_success_at": fetched} if fetched else {}}
+            state_path = data / "state" / "state.json"
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps({"symbols": symbols}), encoding="utf-8")
+            create_snapshot(data, config, state_path, "full", "run1", None, now=datetime(2026, 10, 22, 2, 0, tzinfo=UTC), min_sp500=0)
+            con = duckdb.connect(str(data / "db" / "market_snapshot.db"), read_only=True)
+            try:
+                flags = dict(con.execute("SELECT symbol, provisional FROM bar_status").fetchall())
+                final_after = con.execute("SELECT CAST(final_after_utc AS VARCHAR) FROM bar_status WHERE symbol = 'SPY'").fetchone()[0]
+                # The documented reader query: prices_daily without provisional last bars.
+                final_rows = con.execute(
+                    """SELECT p.symbol, CAST(p.date AS VARCHAR) FROM prices_daily p
+                       LEFT JOIN bar_status b ON b.symbol = p.symbol AND b.last_bar_date = p.date AND b.provisional
+                       WHERE b.symbol IS NULL ORDER BY 1, 2"""
+                ).fetchall()
+            finally:
+                con.close()
+        self.assertEqual(flags, {"SPY": True, "QQQ": True, "IWM": True, "EFA": False, "EEM": False, "VNQ": None})
+        self.assertEqual(final_after, "2026-10-21 21:10:00")
+        self.assertEqual(final_rows, [("EEM", "2026-10-16"), ("EFA", "2026-10-20"), ("SPY", "2026-10-19"), ("VNQ", "2026-10-20")])
+
 
 def _articles(day_counts: dict[str, int]) -> list[dict]:
     items, ident = [], 0

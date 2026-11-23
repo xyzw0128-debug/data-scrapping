@@ -239,6 +239,27 @@ class PeriodicRebuildTest(unittest.TestCase):
             state = rebuild.load_maintenance(data_dir)
             self.assertEqual((state["baseline_bytes"], len(state["history"])), (db_path.stat().st_size, 1))
 
+    def test_bar_status_view_from_the_snapshot_survives_a_rebuild(self) -> None:
+        from src.snapshot import create_snapshot
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir, config = root / "data", root / "config"
+            config.mkdir()
+            (config / "core_etfs.txt").write_text("AAA\n", encoding="utf-8")
+            (config / "fred_series.txt").write_text("", encoding="utf-8")
+            db_path = self._v4_db(data_dir)
+            state_path = data_dir / "state" / "state.json"
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps({"symbols": {"AAA": {"twelve_data": {"last_success_at": "2024-12-27T22:00:00Z"}}}}), encoding="utf-8")
+            create_snapshot(data_dir, config, state_path, "full", "run1", None, now=NOW, min_sp500=0)
+            before = _query(db_path, "SELECT * FROM bar_status ORDER BY ALL")
+            code, result = _rebuild_main(data_dir, "--memory-limit", "256MB", "--threads", "1")
+            self.assertEqual((code, result["status"]), (0, "rebuilt"))
+            self.assertIn("bar_status", result["checks"]["views"])
+            self.assertEqual(_query(db_path, "SELECT * FROM bar_status ORDER BY ALL"), before)
+        self.assertIn(("AAA", "core_etf", date(2024, 12, 27), "2024-12-27T22:00:00Z", datetime(2024, 12, 28, 21, 10), True), before)
+
     def test_same_day_backups_do_not_collide_and_v3_needs_conversion_first(self) -> None:
         from src import rebuild
 

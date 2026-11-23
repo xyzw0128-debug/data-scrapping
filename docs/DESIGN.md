@@ -28,7 +28,7 @@
 
 ## 2. 하루 실행 흐름 (`scripts/run_daily.sh`)
 
-타이머: `Mon..Fri 16:10 America/New_York`, `Persistent=true`(서머타임 자동 반영, 겨울 06:10 KST / 여름 05:10 KST).
+타이머: `Tue..Sat 01:10 UTC`, `Persistent=true`(2026-11-24부터. New York 월~금 저녁 겨울 20:10 / 여름 21:10, KST는 계절과 상관없이 10:10). 이전 `Mon..Fri 16:10 America/New_York`에서 옮긴 이유는 두 가지입니다. 마감 몇 시간 뒤라 기준 거래일 봉의 종가·거래량이 확정값에 가깝고(4절 '기준 거래일 봉의 잠정값'), Twelve Data 단계(약 4시간 10분)가 키 예산이 초기화되는 다음 00:00 UTC 전에 끝납니다(3절).
 
 | 순서 | 단계 | 비고 |
 |---|---|---|
@@ -45,7 +45,7 @@
 
 - 단계가 실패해도 다음 단계를 계속하고 마지막에 실패 단계를 보고합니다.
 - 실행 전체를 `data/state/pipeline.lock`(flock) 하나로 직렬화합니다.
-- 놓친 실행은 바로 돌되, 기준 거래일보다 새로운 봉(장중 미완성 봉)은 저장하지 않습니다.
+- 놓친 실행은 바로 돌되, 기준 거래일보다 새로운 봉(장중 미완성 봉)은 저장하지 않습니다. 그 실행이 받은 기준 거래일 봉은 잠정값일 수 있고 스냅숏의 `bar_status`에 표시됩니다(5절).
 
 ## 3. Twelve Data
 
@@ -66,7 +66,7 @@
 - 실행 시작 때 `/api_usage`의 서버 `daily_usage`를 읽어 `state.json` 값과 큰 쪽을 씁니다. 두 번 시도해도 읽지 못한 키는 그 실행에서 제외합니다(모르는 외부 사용량이 reserve를 깎지 않게). 로컬 예산이 없는 키는 조회하지 않습니다. 실행당 상한이 `/api_usage` 1크레딧을 낼 수 없으면(예: 핵심 단계가 상한을 다 쓴 뒤의 순환 단계) 어느 키도 조회하지 않고 제외하지도 않습니다(`usage_sync`에 `skipped: run_credit_cap`). 상한은 그 실행의 모든 유료 호출을 막으므로 reserve가 깎이지 않습니다.
 - 결과가 불확실한 시도(네트워크 오류, 응답 유실·도중 끊김(`http.client.IncompleteRead`·`BadStatusLine` 등), HTTP 5xx)도 시도마다 크레딧을 차감합니다.
 - 호출할 때마다 UTC 날짜를 확인합니다. 실행 중 자정을 넘으면 새 날 예산으로 셉니다.
-- 순환 단계는 UTC 자정을 넘기곤 합니다(시작 여름 20:10 UTC, 겨울 21:10 UTC). 자정 뒤에 쓴 크레딧은 다음 날 키 예산에서 빠집니다. 겨울에는 자정 전에 약 1,190크레딧만 쓸 수 있어 상한 1800이면 약 570이 다음 날로 넘어가고, 다음 날 쓸 수 있는 양은 약 1,530입니다. 핵심 단계(약 1,055) 여유를 남기려고 상한을 2100(키 3개 전부)이 아닌 1800에 둡니다(2100이면 여유가 약 130).
+- 타이머 실행(01:10 UTC 시작)은 Twelve Data 단계가 약 05:20 UTC에 끝나 UTC 자정을 넘기지 않습니다. 한 실행(약 1,757크레딧)이 한 UTC 날 예산(2,100) 안에서 끝나므로 하루 약 340이 남습니다. 2026-11-23까지(16:10 New York 시작)는 순환 단계가 자정을 넘겼습니다. 겨울에는 약 570크레딧이 다음 날 키 예산에서 빠져 다음 날 쓸 수 있는 양이 약 1,530이었고, 그래서 핵심 단계(약 1,055) 여유를 남기려고 상한을 2100(키 3개 전부)이 아닌 1800에 두었습니다. 이 이월은 없어졌지만 상한은 1800 그대로입니다(올릴지는 따로 결정). 손으로 실행하거나 부팅 직후 늦게 시작한 실행은 여전히 자정을 넘길 수 있고, 그때는 위 규칙대로 새 날 예산으로 셉니다.
 - `state.json`의 `calls_used_today` 필드 이름은 유지하고 값은 크레딧으로 해석합니다(기존 값과 호환).
 - 분당 7회 제한(`per_minute_limit`)은 모든 HTTP 호출에 적용합니다.
 
@@ -117,6 +117,11 @@
 ## 4. 기준 거래일과 완료 상태
 
 - 기준 거래일(`session_date`): 실행 시점 뉴욕 시간으로 마지막으로 끝난 정규장. 16:10 ET 전이면 전 거래일입니다. NYSE 정기 휴장일(신정, MLK, 대통령의 날, 성금요일, 메모리얼, 준틴스, 독립기념일, 노동절, 추수감사절, 성탄절, 대체 휴일 규칙 포함)을 계산합니다. 일회성 휴장일(`SPECIAL_CLOSURES`: 2001-09-11~14, 2004-06-11, 2007-01-02, 2012-10-29·30, 2018-12-05, 2025-01-09)도 휴장으로 봅니다. 새 일회성 휴장은 직접 추가해야 하며, 추가하지 않으면 그날 봉을 기대해 핵심 종목이 `partial`이 됩니다.
+- 기준 거래일 봉의 잠정값(2026-11-24 측정, 운영 백업·스냅숏과 2026-05~06 원본 응답 비교): 16:10 ET는 정규장이 끝났다는 기준일 뿐 그날 봉이 확정됐다는 뜻이 아닙니다. Twelve Data는 마감 직후 일부 거래소(미국 거래량의 약 5%) 값을 내고, 모든 거래소를 합친 EOD 값은 다음 날 냅니다. 응답에는 확정 여부 필드가 없고, 최종값은 거래량이 100주 단위입니다(핵심 종목 확정값 99.7%, 같은 날 저녁 값 0~6%).
+  - 10-27 핵심 524종목: 17:05 ET 전에 받은 191종목은 거래량이 확정값의 약 6%이고 종가가 177종목에서 다릅니다(최대 20bp). 17:05~17:40 ET는 거래량 0.4~3배, 종가 최대 33bp입니다. 17:40 ET 뒤 211종목은 종가 2종목(최대 1.7bp)·거래량 오차 중앙값 0.02%(p90 2.2%, 최대 11.7%)로 확정값에 가깝지만, 시가 26종목(최대 82bp)·고가·저가 129종목(최대 40bp)이 다릅니다.
+  - 확정값에 가까워지는 시각은 날마다 다릅니다: 10-27 17:35, 10-20 약 18:00, 10-23 약 19:30~20:00 ET(순환 종목). 그래서 타이머를 01:10 UTC(겨울 20:10 / 여름 21:10 ET)에 둡니다(2절).
+  - 다음 날 16:10 ET 뒤에 받은 봉은 가격이 확정값과 같고 거래량만 약 5% 종목에서 최대 4.8% 다릅니다. 평일 EOD 값은 다음 날 05:00 ET에도 아직 없었고, 금요일 봉은 토요일 00~01시 ET에 들어왔습니다.
+  - 다음 실행이 그 봉을 다시 받아 고칩니다. 아직 다시 받지 않은 마지막 봉은 스냅숏의 `bar_status`가 표시합니다(5절).
 - 검증(`src.validate_duckdb`)은 `issues`(중복 날짜, 잘못된 값)가 있을 때만 `fail`입니다. 데이터 규칙 점검은 `warnings`로 남기고 상태를 바꾸지 않습니다.
   - `core_gap`: 핵심 종목(활성 core_etf·core_sp500·core_extra)의 첫 봉(시작일이 더 늦으면 시작일)부터 마지막 봉(최근 `collection_runs.session_date`를 넘지 않음)까지의 거래일 중 봉이 없는 날. 알려진 빈칸과 보정 날짜는 뺍니다. 저장된 적 없는 빈칸도 잡힙니다.
   - `core_stale`: 마지막 봉이 그 기준 거래일보다 이른 핵심 종목, 봉이 없는 핵심 종목.
@@ -137,7 +142,7 @@
 ## 5. 스냅숏과 stockpred 데이터 계약
 
 - DuckDB는 쓰는 프로세스가 있으면 다른 프로세스가 읽기 전용으로도 열 수 없습니다. stockpred는 `data/db/market_snapshot.db`만 엽니다.
-- 만드는 순서(잠금 안): `symbol_status`·`collection_runs` 기록 → `CHECKPOINT` → 연결 닫기 → 임시 파일로 복사 → 읽기 전용으로 열어 확인 → `os.replace`.
+- 만드는 순서(잠금 안): `symbol_status`·`bar_status` 뷰·`collection_runs` 기록 → `CHECKPOINT` → 연결 닫기 → 임시 파일로 복사 → 읽기 전용으로 열어 확인 → `os.replace`.
 
 ### 테이블/뷰
 
@@ -146,6 +151,7 @@
 | `prices_daily` (뷰) | symbol, date, open, high, low, close, adj_close, volume, dividends, splits — stockpred `STD_COLS`와 같은 이름·의미 |
 | `corporate_actions` | symbol, date, type(`split`), value, source, updated_at |
 | `symbol_status` | symbol, yahoo_symbol, group_name, active, delisted_at, last_bar_date, last_success_at, core_session, splits_complete |
+| `bar_status` (뷰) | symbol, group_name, last_bar_date, last_success_at, final_after_utc `TIMESTAMP`, provisional `BOOLEAN` — 종목의 마지막 봉이 잠정값인지(아래 '잠정 봉') |
 | `collection_runs` | run_id, phase, started_at, finished_at, session_date, status, core_expected, core_ok, missing_symbols, fred_expected, fred_ok, missing_series, note, splits_ok, missing_splits, universe_issue (splits_ok 이후 3개는 스키마 버전 3에서 추가) |
 | `series_meta` | series_id, title, frequency, units, release, license_note, personal_use_only, updated_at |
 | `ohlcv` | symbol, date `DATE`, open/high/low/close `DOUBLE`, volume `BIGINT`, updated_at `VARCHAR`, adj_close `DOUBLE` (스키마 버전 4). PK (symbol, date) |
@@ -163,11 +169,18 @@
 | dividends | 0 (무료 키로 받을 수 없음. stockpred 패널 계산은 이 컬럼을 쓰지 않음) |
 
 - 타입: date `DATE`, open/high/low/close/adj_close/volume `DOUBLE`, dividends `DECIMAL(2,1)`, splits `DOUBLE`. 스키마 버전 4에서도 같습니다(volume은 `BIGINT`로 저장하고 뷰에서 `CAST(volume AS DOUBLE)`).
+- 잠정 봉(`bar_status` 뷰, 2026-11-24): 종목의 마지막 봉(`last_bar_date`)은 그 종목을 다음 날 21:10 UTC(`final_after_utc`, 겨울 16:10 New York, 여름은 1시간 보수적) 이후에 다시 받기 전까지 `provisional = true`입니다. 그 앞의 봉은 모두 확정값입니다. `NULL`은 모름(봉이나 받은 시각 기록이 없음)입니다. 타이머 실행이 받은 기준 거래일 봉은 늘 `true`이고(종가·거래량은 확정값에 가까움, 4절) 다음 실행이 확정값으로 고칩니다. 판정은 스냅숏이 쓰는 `symbol_status`만 보는 UTC 계산이라 읽는 쪽에 시간대 확장이 필요 없습니다. 스냅숏 단계(`src.snapshot`)가 만들고 `src.rebuild`가 다른 뷰처럼 복사·검증합니다. `prices_daily`의 열과 의미는 그대로입니다. 확정값만 읽기:
+
+```sql
+SELECT p.* FROM prices_daily p
+LEFT JOIN bar_status b ON b.symbol = p.symbol AND b.last_bar_date = p.date AND b.provisional
+WHERE b.symbol IS NULL;
+```
 - 데이터 규칙(3절, 2026-10-23)으로 컬럼 이름·의미는 그대로이고 행만 바뀝니다. 휴장일 봉과 시작일 이전 행이 빠지고(운영 반영 때 3,347행: 휴장일 2,956행, GM 2010-11-18 이전 391행), 보정 봉이 들어갑니다(MNST 2026-08-10). stockpred는 벤치마크 거래일로 맞추므로 휴장일 봉은 원래 쓰지 않았고, 달라지는 것은 GM·MNST이며 둘 다 Yahoo와 같아지는 방향입니다.
 
 - Yahoo 캐시와 대조(2026-10-20, NVDA·BRK.B·SPY 5000행): close 일치(오차 5e-8 이하), volume 99% 구간 일치, 최근 2년 배당 조정계수 차이 0.007% 이하.
 - 알려진 차이: Twelve Data `adjust=all`에는 2012~2013년 일부 배당(NVDA 첫 배당 3회, SPY 2012-09-21)이 빠져 있어 그 날짜를 지나는 수익률이 배당만큼(약 0.5%) 다릅니다. 그래서 어댑터 검증은 값 수준이 아니라 날짜별 조정계수 변화(`(adj/close)_t / (adj/close)_{t-1}`)를 비교하고, 허용 오차는 close 일치, 최근 2년 조정계수 0.01%, volume 1%로 둡니다.
-- 대조 중 stockpred Yahoo 캐시의 2026-10-13 NVDA 종가가 장중 값(224.75, 확정 종가 228.52)으로 저장돼 있던 것을 발견했습니다. 스냅숏은 기준 거래일 이후 봉을 저장하지 않으므로 이런 값이 들어가지 않습니다.
+- 대조 중 stockpred Yahoo 캐시의 2026-10-13 NVDA 종가가 장중 값(224.75, 확정 종가 228.52)으로 저장돼 있던 것을 발견했습니다. 스냅숏은 기준 거래일 이후(장중) 봉을 저장하지 않으므로 이런 값이 들어가지 않습니다. 다만 기준 거래일 봉 자체도 다음 날까지는 Twelve Data 잠정값이라 `bar_status`로 표시합니다(4절, 2026-11-24).
 
 ### 스키마 버전 4와 재구성 (`src.rebuild`)
 
@@ -223,9 +236,9 @@
 
 ## 10. 운영하며 확인할 것
 
-- 16:10 ET에 그날 일봉(거래량 포함)이 확정돼 있는지.
+- ~~16:10 ET에 그날 일봉(거래량 포함)이 확정돼 있는지.~~ 확정돼 있지 않음(2026-11-24, 4절). 남은 확인: 01:10 UTC 타이머 실행이 받은 기준 거래일 봉이 다음 날 값과 얼마나 다른지, 평일 EOD 값이 들어오는 시각(선택 측정, 실제 API).
 - S&P 공개 목록의 반영 지연(2026-10-20 기준 마지막 변경 2026-08-18).
 - Finnhub 잘림 기준 200건.
 - Twelve Data 실행당 1,800크레딧·분당 7회, Finnhub 분당 50회에서 오류가 나는지.
-- 겨울(표준시)에 전날 실행이 UTC 자정 뒤에 쓴 크레딧 때문에 핵심 단계가 키 예산에 막히지 않는지.
+- 겨울(표준시)에 전날 실행이 UTC 자정 뒤에 쓴 크레딧 때문에 핵심 단계가 키 예산에 막히지 않는지. 타이머를 01:10 UTC로 옮긴 뒤에는 손으로 늦게 시작한 실행에서만 생깁니다(3절).
 - 검증 경고: 새 `core_gap`(보정할지 알려진 빈칸으로 둘지 결정), 핵심 종목 `vanished_dates` WARNING, `patch_missing`. 순환 종목 `vanished_dates`는 1주 운영 뒤 소음 수준을 보고 계속 셀지 정합니다.

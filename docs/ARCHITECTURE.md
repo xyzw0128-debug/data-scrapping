@@ -27,7 +27,7 @@ systemd/
 - `src/universe.py`: 핵심/순환 종목 목록, S&P 500 구성종목(fja05680 CSV), NASDAQ 목록, 상장폐지 표시. `python -m src.universe`로 갱신.
 - `src/market_calendar.py`: NYSE 정기 휴장일과 기준 거래일(마지막으로 끝난 정규장) 계산.
 - `src/corporate_actions.py`: `adjust=none`/`adjust=splits` 종가 비율로 분할 이벤트 계산, 분할 기준 변경 감지.
-- `src/snapshot.py`: 완료 판정(`complete/partial/failed`), `symbol_status`·`collection_runs` 기록, `market_snapshot.db` 원자적 교체.
+- `src/snapshot.py`: 완료 판정(`complete/partial/failed`), `symbol_status`·`collection_runs` 기록, 잠정 봉 표시 뷰(`bar_status`), `market_snapshot.db` 원자적 교체.
 - `src/fred.py`: FRED 관측값(`first_seen_at` 보존 업서트), 시리즈 메타(`series_meta`, 권리 문구 감지), `data/state/fred.json`.
 - `src/finnhub_news.py`: Finnhub 뉴스. 잘린 응답 페이지 나눠 받기, 종목별 이어받기 창, 핵심 종목 우선.
 - `src/indicators.py`: OHLCV가 바뀐 종목만 SMA/RSI/MACD 재계산(기본은 OHLCV가 있는 모든 종목).
