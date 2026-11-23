@@ -19,7 +19,7 @@ The design, budgets, and the stockpred data contract are in [`docs/DESIGN.md`](d
 - DuckDB schema version 4: `ohlcv`/`indicators` store DATE/DOUBLE/BIGINT values (about half the size of the VARCHAR version 3). Bars are validated in Python before writing; a malformed value fails only that symbol. Typed view names, columns, and types are unchanged.
 - `market.db` rebuild (`src.rebuild`): the one-off v3 → v4 conversion, and a periodic rebuild into a new file when `market.db` grows past twice its size right after the last rebuild (space of deleted or rewritten rows is never reclaimed in place). Verified against the original before an atomic swap; the original is kept as a hard-linked backup.
 - FRED macro series with `first_seen_at` (when an observation first appeared) and `series_meta` (copyright-restricted series are flagged personal-use only).
-- Finnhub company news with paging for truncated responses and per-symbol resumable windows, core symbols first.
+- Finnhub company news with paging for truncated responses and per-symbol resumable windows, core symbols first. Core symbols are requested every run; other symbols wait 1, 2, 4, 7 days after 1, 2, 3, 4+ consecutive runs without new articles (`FINNHUB_BACKOFF_DAYS`) and return to every run after one new article. The next request still covers the skipped days. One DB transaction per symbol; an empty answer does not overwrite the raw file.
 - Local technical indicators (SMA/RSI/MACD): price writers delete a symbol's indicator rows from the earliest changed close, and the indicator step fills only the missing dates.
 - Leakage-safe ML dataset export (`src.export_dataset`).
 - One pipeline lock (`data/state/pipeline.lock`, flock) shared by `scripts/run_daily.sh` and every CLI that writes data.

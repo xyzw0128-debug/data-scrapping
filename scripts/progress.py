@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.env import load_project_env  # noqa: E402
-from src.finnhub_news import universe_news_symbols  # noqa: E402
+from src.finnhub_news import DEFAULT_BACKOFF_DAYS, news_check_date, parse_backoff_days, universe_news_symbols  # noqa: E402
 from src.lock import PIPELINE_LOCK_NAME, pipeline_running  # noqa: E402
 from src.market_calendar import expected_session  # noqa: E402
 from src.universe import load_universe  # noqa: E402
@@ -340,10 +340,22 @@ def news_progress(since: datetime, path: Path) -> tuple[int, int, datetime | Non
     return attempted, failed, first
 
 
-def news_planned() -> int:
-    """뉴스 단계 대상 종목 수(src.finnhub_news 기본 선택, FINNHUB_LIMIT 반영). 못 세면 0."""
+def news_planned(since: datetime | None = None) -> int:
+    """뉴스 단계 대상 종목 수(src.finnhub_news 기본 선택, FINNHUB_LIMIT·FINNHUB_BACKOFF_DAYS 반영). 못 세면 0.
+
+    0건 간격으로 쉬는 순환 종목은 빼고 센다. since(잠금 시각) 이후 이미 시도한 종목은 다음
+    조회일이 뒤로 밀렸어도 이번 실행 대상이었으므로 넣는다.
+    """
     try:
-        total = len(universe_news_symbols(load_universe(DATA_DIR), {}, {}, None))
+        path = DATA_DIR / "state" / "finnhub_news.json"
+        symbols = json.loads(path.read_text(encoding="utf-8")).get("symbols", {}) if path.exists() else {}
+        def attempted_this_run(entry: dict) -> bool:
+            stamp = parse_iso(entry.get("last_attempt_at"))
+            return since is not None and stamp is not None and stamp >= since
+
+        news_state = {symbol: entry for symbol, entry in symbols.items() if isinstance(entry, dict) and not attempted_this_run(entry)}
+        backoff_days = parse_backoff_days(os.environ.get("FINNHUB_BACKOFF_DAYS", "").strip() or ",".join(map(str, DEFAULT_BACKOFF_DAYS)))
+        total = len(universe_news_symbols(load_universe(DATA_DIR), news_state, {}, None, news_check_date(), backoff_days))
     except Exception:
         return 0
     limit = os.environ.get("FINNHUB_LIMIT", "").strip()
@@ -366,7 +378,7 @@ def render_pipeline_stage() -> None:
     attempted, failed, first = news_progress(since, DATA_DIR / "state" / "finnhub_news.json")
     if not attempted and stage != NEWS_STAGE:
         return
-    planned = max(news_planned(), attempted, 1)
+    planned = max(news_planned(since), attempted, 1)
     if attempted >= planned:
         eta = "완료"
     elif first is not None:

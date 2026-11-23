@@ -713,6 +713,37 @@ def upsert_news_db(data_dir: Path, symbol: str, rows: list[dict[str, str]]) -> s
     return _upsert(data_dir, "news", NEWS_COLUMNS, ["symbol", "id"], values)
 
 
+def upsert_symbol_news(data_dir: Path, symbol: str, rows: list[dict[str, str]]) -> int:
+    """Upsert one symbol's articles (every page of a request) with one connection and transaction.
+
+    Returns how many article ids were not stored before for this symbol. Rows without an id are
+    not stored and not counted; an id that appears on two pages counts once (the later row wins).
+    """
+    now = utc_now_iso()
+    values: dict[str, list[str]] = {}
+    for row in rows:
+        news_id = row.get("id", "")
+        if news_id:
+            values[news_id] = [symbol, news_id, *(row.get(field, "") for field in NEWS_COLUMNS[2:-1]), now]
+    if not values:
+        return 0
+    ensure_db_schema(data_dir)
+    con = _connect_db(data_dir)
+    try:
+        con.begin()
+        stored = con.execute(
+            "SELECT count(*) FROM news WHERE symbol = ? AND id IN (SELECT unnest(?))", [symbol, list(values)]
+        ).fetchone()[0]
+        bulk_upsert(con, data_dir, "news", NEWS_COLUMNS, ["symbol", "id"], list(values.values()))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+    return len(values) - int(stored)
+
+
 def _ohlcv_dict(record: Sequence[Any]) -> dict[str, str]:
     # Only NULL becomes ""; a numeric 0 (e.g. zero volume) must stay "0".
     return {field: "" if value is None else str(value) for field, value in zip(OHLCV_FIELDS, record)}

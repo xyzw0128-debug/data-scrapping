@@ -51,7 +51,7 @@ class RunningStageTest(unittest.TestCase):
 class RenderTest(unittest.TestCase):
     def _render(self, data_dir: Path, state: dict) -> str:
         out = io.StringIO()
-        with patch.object(progress, "DATA_DIR", data_dir), patch.object(progress, "news_planned", lambda: 10), contextlib.redirect_stdout(out):
+        with patch.object(progress, "DATA_DIR", data_dir), patch.object(progress, "news_planned", lambda since=None: 10), contextlib.redirect_stdout(out):
             progress.render(state, {})
         return out.getvalue()
 
