@@ -33,32 +33,46 @@ def _save(path: Path, payload: dict) -> None:
     atomic_write_json(path, payload)
 
 
-def _count_progress(data_dir: Path, total: int) -> int:
+PHASE_LABELS = {"core": "핵심", "rotation": "순환"}
+
+
+def _read_progress(data_dir: Path) -> tuple[str, int, int] | None:
+    """(phase, handled, planned) of the Twelve Data phase from state.json, None when unknown.
+
+    A running phase is ``current_run`` (saved every few symbols); after it ends, the latest
+    ``runs`` entry finished today. Handled counts done and failed symbols. Core and rotation are
+    separate invocations, so each has its own planned count (e.g. 526 core, up to 700 rotation).
+    """
     path = data_dir / "state" / "state.json"
-    if not path.exists():
-        return 0
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
-        return 0
-    symbols = state.get("symbols", {}) if isinstance(state, dict) else {}
-    today = utc_today()
-    done = 0
-    for item in symbols.values() if isinstance(symbols, dict) else []:
-        if not isinstance(item, dict):
-            continue
-        provider_state = item.get("twelve_data", {})
-        if isinstance(provider_state, dict) and provider_state.get("last_success_date") == today:
-            done += 1
-    return min(done, total)
+        return None
+    if not isinstance(state, dict):
+        return None
+    run = state.get("current_run")
+    if isinstance(run, dict):
+        phase, planned = run.get("phase"), run.get("planned")
+    else:
+        runs = state.get("runs")
+        run = runs[-1] if isinstance(runs, list) and runs else None
+        if not isinstance(run, dict) or not str(run.get("finished_at", "")).startswith(utc_today()):
+            return None
+        phase, planned = run.get("current_phase"), run.get("current_planned")
+    if not isinstance(planned, int) or planned < 0:
+        return None
+    handled = int(run.get("processed") or 0) + int(run.get("failed") or 0)
+    return str(phase or ""), min(handled, planned), planned
 
 
 def _format_message(s: dict) -> str:
+    phase = PHASE_LABELS.get(s.get("progress_phase", ""), s.get("progress_phase", ""))
+    progress = f"{s['progress_done']}/{s['progress_total']}" if "progress_total" in s else "-"
     return (
         "📊 데이터 수집 상태\n\n"
         f"전원 상태: {s.get('power_status', '상태 미확인')}\n\n"
         f"상태: {s.get('status', '대기중')}\n"
-        f"진행률: {s.get('progress_done', 0)}/{s.get('progress_total', 700)}\n\n"
+        f"진행률: {(phase + ' ') if phase else ''}{progress}\n\n"
         f"수집 시작: {s.get('collect_started_at', '대기중')}\n"
         f"최근 업데이트: {s.get('last_updated_at', _now_hms())}\n\n"
         "현재 처리:\n"
@@ -96,8 +110,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--backup-finish", action="store_true")
     p.add_argument("--error", default=None)
     p.add_argument("--set-start", action="store_true")
-    p.add_argument("--progress-total", type=int, default=700)
-    p.add_argument("--refresh-progress", action="store_true")
+    p.add_argument("--refresh-progress", action="store_true", help="Read the Twelve Data phase progress from state.json")
     return p.parse_args()
 
 
@@ -109,8 +122,6 @@ def main() -> int:
         return 0
 
     state = _load(args.state_path)
-    state.setdefault("progress_total", args.progress_total)
-    state.setdefault("progress_done", 0)
     state["power_status"] = "실행 중"
     state["last_updated_at"] = _now_hms()
 
@@ -122,13 +133,16 @@ def main() -> int:
         state["last_error"] = args.error
     if args.set_start:
         state["collect_started_at"] = _now_hms()
-        state["progress_done"] = 0
+        for key in ("progress_phase", "progress_done", "progress_total"):
+            state.pop(key, None)
     if args.backup_start:
         state["backup_started_at"] = _now_hms()
     if args.backup_finish:
         state["backup_finished_at"] = _now_hms()
     if args.refresh_progress:
-        state["progress_done"] = _count_progress(args.data_dir, state.get("progress_total", args.progress_total))
+        progress = _read_progress(args.data_dir)
+        if progress is not None:  # otherwise keep the last known progress
+            state["progress_phase"], state["progress_done"], state["progress_total"] = progress
 
     create = not state.get("message_id")
     try:

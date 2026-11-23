@@ -173,17 +173,15 @@ def validate_with_duckdb(data_dir: Path, rules: DataRules | None = None) -> dict
         for sym, dt, cnt in dupes:
             issues.append({"dataset": "ohlcv", "type": "duplicate_date", "symbol": sym, "date": dt, "count": cnt})
 
+        # Schema version 4 columns are DOUBLE/BIGINT already, so values are compared as stored.
         invalid = con.execute(
             """
             SELECT symbol, date, open, high, low, close, volume
             FROM ohlcv
-            WHERE TRY_CAST(high AS DOUBLE) < TRY_CAST(low AS DOUBLE)
-               OR TRY_CAST(volume AS DOUBLE) < 0
-               OR TRY_CAST(open AS DOUBLE) IS NULL
-               OR TRY_CAST(high AS DOUBLE) IS NULL
-               OR TRY_CAST(low AS DOUBLE) IS NULL
-               OR TRY_CAST(close AS DOUBLE) IS NULL
-               OR TRY_CAST(volume AS DOUBLE) IS NULL
+            WHERE open IS NULL OR high IS NULL OR low IS NULL OR close IS NULL OR volume IS NULL
+               OR NOT (isfinite(open) AND isfinite(high) AND isfinite(low) AND isfinite(close))
+               OR high < low
+               OR volume < 0
             """
         ).fetchall()
         for row in invalid:

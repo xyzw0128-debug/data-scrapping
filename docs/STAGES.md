@@ -143,7 +143,12 @@
 - [x] 같은 응답 재생(바뀐 것 없음): 1,223종목 모두 쓰기 0(보존 행 2,953 그대로), 지표 처리 0종목, 파일 1,407,463,424바이트 그대로. worktree `DRY_RUN=1 scripts/run_daily.sh`(빈 데이터) 실패 단계 없음
 - [ ] 운영 반영(수집이 돌지 않을 때): `main` fast-forward → `DRY_RUN=1 scripts/run_daily.sh` → `src.rebuild`(2.69GB → 약 1.4GB, 백업 2개 규칙) → 첫 실행 뒤 `rows_written`·파일 증가량·`validate_duckdb` 확인
 - stockpred 영향: `prices_daily` 열 이름·의미 그대로. 응답보다 오래된 행이 남아 20년 넘는 종목의 이력이 거래일마다 1행씩 길어지고, 분할·배당 때 옛 행도 같은 배율로 다시 맞춰짐
-- 범위 밖(별도 작업): 핵심 수집 시작 시각(잠정 봉), Finnhub 조회 간격, 옛 raw 1.9GB 보관, 정체 핵심 종목(WBD·PSKY·KVUE), Discord `progress_total`
+- 범위 밖(별도 작업): 핵심 수집 시작 시각(잠정 봉), Finnhub 조회 간격, 옛 raw 1.9GB 보관, 정체 핵심 종목(WBD·PSKY·KVUE)
+
+## 2026-11-24 작은 수정: Discord 진행률·검증 쿼리
+- [x] `src.discord_status`: 진행률이 고정 분모 700에 오늘 성공한 종목 수(핵심+순환)를 대고 700에서 잘리던 것을, `state.json`의 현재 단계(`current_run`의 `phase`·`planned`·`processed`+`failed`, 단계가 끝난 뒤에는 오늘 끝난 마지막 `runs` 항목)로 표시하도록 수정(예: `진행률: 순환 643/700`). 읽을 수 없으면 마지막 값을 유지. `--progress-total` 옵션 제거(`run_daily.sh`는 쓰지 않음). 현재 `SEND_DISCORD=0`이라 운영에는 켜야 드러남
+- [x] `src.validate_duckdb`: 스키마 버전 4 열(`DOUBLE`/`BIGINT`)에 쓰던 `TRY_CAST(... AS DOUBLE)` 7개를 그대로 비교로 바꾸고 무한대 검사(`isfinite`) 추가. 운영 스냅숏에서 결과 같음(이상 0행), 시간은 둘 다 1초 미만이라 속도 이득은 없음. 중복 날짜 검사는 PK가 있어도 남김(1초 미만)
+- [x] 테스트 129개 통과(진행률: 실행 중 단계·끝난 단계·옛 실행 무시·메시지 형식, 검증: 고가<저가·음수·NULL 거래량·무한대)
 
 ## 이전 다음 작업
 - [x] run_daily.sh에 DuckDB 검증 단계 포함
