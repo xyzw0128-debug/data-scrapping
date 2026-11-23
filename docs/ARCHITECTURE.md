@@ -10,7 +10,7 @@ config/
 data/
   db/        market.db, market_snapshot.db, market.db.bak-<UTC 날짜>(재구성 전 원본, 최신 2개만 남김)
   logs/      collector.log, runs/, daily/, validation/
-  raw/       twelve_data/{splits,all,none}/<symbol>.json.gz, fred/, finnhub_news/
+  raw/       twelve_data/{splits,all,none}/<symbol>.json.gz, fred/, finnhub_news/, archive/(2026-10-20 이전 옛 응답 tar.gz)
   state/     state.json, universe.json, sp500_hist.csv, fred.json, finnhub_news.json, db_maintenance.json, pipeline.lock
 scripts/
   install_local.sh  lib_env.sh  progress.py  rclone_backup.sh  run_daily.sh
