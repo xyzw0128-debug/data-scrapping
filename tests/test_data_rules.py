@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from src import main, ohlcv_cleanup, summary, validate_duckdb
+from src import main, ohlcv_cleanup, storage, summary, validate_duckdb
 from src.corporate_actions import split_basis_changed, split_events
 from src.data_rules import BarPatch, DataRules, DataRulesError, load_data_rules
 from src.lock import PIPELINE_LOCK_ENV, pipeline_lock
@@ -212,7 +212,7 @@ class CollectionWithRulesTest(unittest.TestCase):
         client = FakeClient({"splits": {d: p for d, p in week.items() if d != "2024-06-05"}, "all": week, "none": week})
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
-            main.replace_symbol_prices(data_dir, "AAA", _rows({**week, "2024-06-08": 10.0}))  # a stored Saturday is not reported
+            storage.replace_symbol_prices(data_dir, "AAA", _rows({**week, "2024-06-08": 10.0}))  # a stored Saturday is not reported
             state: dict = {}
             args = argparse.Namespace(dry_run=False, force=False, data_dir=data_dir, state=data_dir / "state" / "state.json")
             run_summary = {"started_at": "x", "run_id": "t", "processed": 0, "failed": 0, "skipped_rate_limit": 0, "symbols": []}

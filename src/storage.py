@@ -7,11 +7,13 @@ import json
 import math
 import os
 import re
+import statistics
 import tempfile
+from dataclasses import dataclass, field as dataclass_field
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 from src.atomic_io import atomic_write_bytes, atomic_write_json, json_default
 from src.state import utc_now_iso, utc_today
@@ -36,8 +38,8 @@ SERIES_META_COLUMNS = ["series_id", "title", "frequency", "units", "release", "l
 SCHEMA_VERSION = 4
 REBUILD_HINT = "python -m src.rebuild --to-v4"
 
-# ohlcv.updated_at stays VARCHAR: find_stale_symbols compares it with indicators.updated_at as
-# ISO strings. Column order matches version 3 (adj_close was appended in version 2).
+# updated_at columns stay VARCHAR (ISO strings). Column order matches version 3 (adj_close was
+# appended in version 2).
 TABLE_SQL = {
     "ohlcv": """CREATE TABLE IF NOT EXISTS ohlcv (symbol VARCHAR NOT NULL, date DATE NOT NULL, open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume BIGINT, updated_at VARCHAR NOT NULL, adj_close DOUBLE, PRIMARY KEY(symbol, date))""",
     "indicators": """CREATE TABLE IF NOT EXISTS indicators (symbol VARCHAR NOT NULL, date DATE NOT NULL, sma_20 DOUBLE, sma_50 DOUBLE, sma_200 DOUBLE, rsi_14 DOUBLE, macd_12_26 DOUBLE, macd_signal_9 DOUBLE, macd_hist DOUBLE, updated_at VARCHAR NOT NULL, PRIMARY KEY(symbol, date))""",
@@ -362,19 +364,244 @@ def normalize_twelve_data_ohlcv(payload: dict[str, Any]) -> list[dict[str, Any]]
     return rows
 
 
+def _drop_indicators_from(con, symbol: str, first_day: str) -> None:
+    """Delete a symbol's indicator rows dated on or after first_day.
+
+    Indicators at a date depend only on closes up to that date, so the rows before first_day
+    stay valid. Every OHLCV writer calls this in its own transaction; src.indicators then fills
+    the dates that have no indicator row.
+    """
+    con.execute("DELETE FROM indicators WHERE symbol = ? AND date >= CAST(? AS DATE)", [symbol, first_day])
+
+
 def upsert_ohlcv_db(data_dir: Path, symbol: str, rows: list[dict[str, Any]]) -> str:
     now = utc_now_iso()
     values = [[symbol, *(bar[field] for field in OHLCV_FIELDS), now] for bar in map(normalize_ohlcv_row, rows)]
-    return _upsert(data_dir, "ohlcv", OHLCV_COLUMNS, ["symbol", "date"], values)
+    db_path = ensure_db_schema(data_dir)
+    con = _connect_db(data_dir)
+    try:
+        con.begin()
+        bulk_upsert(con, data_dir, "ohlcv", OHLCV_COLUMNS, ["symbol", "date"], values)
+        if values:
+            _drop_indicators_from(con, symbol, min(value[1] for value in values))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+    return str(db_path)
+
+
+# Price sync (src.main). Twelve Data resends up to 5000 rows of a symbol every time, and nearly all
+# of them are bit-identical to the stored ones: across five sessions (2026-10-27 backup vs the
+# 2026-11-03 snapshot) 99.98% of core rows were equal; the rest were the provisional last bar,
+# dividends in adj_close and splits. Only rows that differ are written. Rows older than the
+# response (it holds at most 5000 rows, about 20 years) are kept and rebased by the factor the
+# oldest overlapping dates show, so a split or dividend applies to them too.
+SYNC_ANCHOR_ROWS = 20       # oldest overlapping dates whose fresh/stored ratio carries over to older rows
+SYNC_MIN_ANCHORS = 5        # fewer usable ratios: the basis of older rows cannot be checked
+SYNC_AGREE_SHARE = 0.8      # share of the anchor ratios that must agree with their median
+SYNC_FACTOR_SPREAD = 1e-4   # how closely a ratio must match the median to agree with it
+SYNC_MIN_CHANGE = 1e-5      # a common factor closer to 1 than this is noise, not a rebase (adj_close noise ~1e-6)
+
+PriceValues = tuple[float | None, float | None, float | None, float | None, int | None, float | None]  # open, high, low, close, volume, adj_close
+CLOSE = 3
+
+
+@dataclass
+class PriceSyncPlan:
+    """What sync_symbol_prices writes for one symbol (see plan_price_sync)."""
+
+    upserts: list[tuple[str, PriceValues]] = dataclass_field(default_factory=list)
+    deletes: list[str] = dataclass_field(default_factory=list)
+    inserted: int = 0
+    updated: int = 0
+    rebased: int = 0
+    older_kept: int = 0
+    older_dropped: int = 0
+    price_factor: float | None = None
+    adj_factor: float | None = None
+    indicator_from: str | None = None
+
+    @property
+    def changes(self) -> bool:
+        return bool(self.upserts or self.deletes or self.indicator_from)
+
+
+def _common_factor(pairs: list[tuple[float | None, float | None]]) -> float | None:
+    """The factor f with fresh = stored * f shared by most (stored, fresh) pairs; None when unclear.
+
+    A factor within SYNC_MIN_CHANGE of 1 is returned as exactly 1.0.
+    """
+    ratios = [new / old for old, new in pairs if old is not None and new is not None and old > 0 and new > 0]
+    if len(ratios) < SYNC_MIN_ANCHORS:
+        return None
+    middle = statistics.median(ratios)
+    agree = sum(1 for ratio in ratios if abs(ratio / middle - 1) <= SYNC_FACTOR_SPREAD)
+    if agree < max(SYNC_MIN_ANCHORS, math.ceil(SYNC_AGREE_SHARE * len(ratios))):
+        return None
+    return 1.0 if abs(middle - 1) <= SYNC_MIN_CHANGE else middle
+
+
+def _rebase(values: PriceValues, price_factor: float, adj_factor: float | None) -> PriceValues:
+    """Older row on the fresh basis: prices times price_factor, volume divided by it.
+
+    adj_factor None means the fresh rows carry no adj_close (rotation basis), so it becomes NULL.
+    """
+    open_, high, low, close, volume, adj = values
+    if price_factor != 1.0:
+        open_, high, low, close = (None if value is None else value * price_factor for value in (open_, high, low, close))
+        volume = None if volume is None else round(volume / price_factor)
+    if adj_factor is None:
+        adj = None
+    elif adj is not None and adj_factor != 1.0:
+        adj = adj * adj_factor
+    return (open_, high, low, close, volume, adj)
+
+
+def plan_price_sync(
+    stored: dict[str, PriceValues],
+    fresh: dict[str, PriceValues],
+    keep_bar: Callable[[str], bool] | None = None,
+) -> PriceSyncPlan:
+    """Compare a symbol's stored rows with a fresh response (both keyed by ISO date).
+
+    - Fresh dates missing from the store are inserted; stored dates whose values differ in any
+      way are replaced. Equal rows are not written.
+    - Stored dates from the response's first date on that the response lacks are deleted, as
+      the full replacement did (src.data_rules reports those inside the range as vanished).
+    - Stored dates before the response's first date are kept and rebased by the common factor
+      of the oldest overlapping dates (close for prices and volume, adj_close for adj_close).
+      Rows keep_bar rejects are deleted. Without a clear factor (too little overlap, or the
+      ratios disagree, e.g. an event among the anchors) every older row is deleted instead, so
+      no row is left on an unknown basis.
+    - indicator_from is the earliest date whose close was inserted, changed or deleted.
+      Indicators read only close, so an adj_close-only change keeps them.
+    """
+    if not fresh:
+        raise ValueError("no fresh rows to compare")
+    plan = PriceSyncPlan()
+    first = min(fresh)
+    close_changed: list[str] = []
+    for day in sorted(fresh):
+        values, old = fresh[day], stored.get(day)
+        if old is None:
+            plan.inserted += 1
+            plan.upserts.append((day, values))
+            close_changed.append(day)
+        elif old != values:
+            plan.updated += 1
+            plan.upserts.append((day, values))
+            if old[CLOSE] != values[CLOSE]:
+                close_changed.append(day)
+    for day in sorted(stored):
+        if day >= first and day not in fresh:
+            plan.deletes.append(day)
+            close_changed.append(day)
+
+    older = sorted(day for day in stored if day < first)
+    if older:
+        anchors = sorted(day for day in stored if day in fresh)[:SYNC_ANCHOR_ROWS]
+        plan.price_factor = _common_factor([(stored[day][CLOSE], fresh[day][CLOSE]) for day in anchors])
+        fresh_has_adj = any(values[5] is not None for values in fresh.values())
+        adj_ok = True
+        if fresh_has_adj:
+            plan.adj_factor = _common_factor([(stored[day][5], fresh[day][5]) for day in anchors])
+            adj_ok = plan.adj_factor is not None
+        if plan.price_factor is None or not adj_ok:
+            plan.deletes.extend(older)
+            plan.older_dropped = len(older)
+            close_changed.append(older[0])
+        else:
+            for day in older:
+                if keep_bar is not None and not keep_bar(day):
+                    plan.deletes.append(day)
+                    close_changed.append(day)
+                    continue
+                plan.older_kept += 1
+                old = stored[day]
+                new = _rebase(old, plan.price_factor, plan.adj_factor)
+                if new != old:
+                    plan.rebased += 1
+                    plan.upserts.append((day, new))
+                    if new[CLOSE] != old[CLOSE]:
+                        close_changed.append(day)
+    plan.indicator_from = min(close_changed) if close_changed else None
+    return plan
+
+
+def sync_symbol_prices(
+    data_dir: Path,
+    symbol: str,
+    rows: list[dict[str, Any]],
+    adj_closes: dict[str, Any] | None = None,
+    keep_bar: Callable[[str], bool] | None = None,
+) -> dict[str, Any]:
+    """Bring a symbol's stored OHLCV rows in line with a fresh response, writing only differences.
+
+    One connection reads the stored rows and applies plan_price_sync in one transaction, with
+    the indicator rows from plan.indicator_from on deleted. Rows are validated first, so a
+    malformed value raises ValueError before anything is read or written. Returns the counts
+    and ``stored_closes`` (the closes before the write, as load_closes returns them).
+    """
+    adj_closes = adj_closes or {}
+    fresh: dict[str, PriceValues] = {}
+    for bar in map(normalize_ohlcv_row, rows):
+        adj = price_value(adj_closes.get(bar["date"]), "adj_close", required=False)
+        fresh[bar["date"]] = (bar["open"], bar["high"], bar["low"], bar["close"], bar["volume"], adj)
+    if not fresh:
+        raise ValueError("no OHLCV rows to store")
+    ensure_db_schema(data_dir)
+    con = _connect_db(data_dir)
+    try:
+        stored: dict[str, PriceValues] = {
+            str(day): (open_, high, low, close, volume, adj)
+            for day, open_, high, low, close, volume, adj in con.execute(
+                "SELECT date, open, high, low, close, volume, adj_close FROM ohlcv WHERE symbol = ?", [symbol]
+            ).fetchall()
+        }
+        plan = plan_price_sync(stored, fresh, keep_bar)
+        if plan.changes:
+            now = utc_now_iso()
+            con.begin()
+            try:
+                if plan.deletes:
+                    con.execute(
+                        "DELETE FROM ohlcv WHERE symbol = ? AND date IN (SELECT CAST(unnest(CAST(? AS VARCHAR[])) AS DATE))",
+                        [symbol, plan.deletes],
+                    )
+                if plan.upserts:
+                    bulk_upsert(con, data_dir, "ohlcv", PRICE_COLUMNS, ["symbol", "date"], [[symbol, day, *values, now] for day, values in plan.upserts])
+                if plan.indicator_from:
+                    _drop_indicators_from(con, symbol, plan.indicator_from)
+                con.commit()
+            except Exception:
+                con.rollback()
+                raise
+    finally:
+        con.close()
+    return {
+        "stored_closes": {day: values[CLOSE] for day, values in stored.items() if values[CLOSE] is not None},
+        "inserted": plan.inserted,
+        "updated": plan.updated,
+        "deleted": len(plan.deletes),
+        "rebased": plan.rebased,
+        "older_kept": plan.older_kept,
+        "older_dropped": plan.older_dropped,
+        "price_factor": plan.price_factor,
+        "adj_factor": plan.adj_factor,
+        "indicator_from": plan.indicator_from,
+    }
 
 
 def replace_symbol_prices(data_dir: Path, symbol: str, rows: list[dict[str, Any]], adj_closes: dict[str, Any] | None = None) -> str:
-    """Replace every OHLCV row of a symbol in one transaction.
+    """Replace every OHLCV row of a symbol in one transaction (tests and one-off tools).
 
-    Old rows outside the new response (an older split basis, or history beyond the
-    5000-row window) are removed. The symbol's indicator rows are removed too, so the next
-    indicator run recalculates them from the new prices. Rows are validated first, so a
-    malformed value raises ValueError before anything is deleted.
+    The daily collector uses sync_symbol_prices instead. Every stored row of the symbol is
+    removed, including history older than the response. The symbol's indicator rows are removed
+    too, so the next indicator run recalculates them from the new prices. Rows are validated
+    first, so a malformed value raises ValueError before anything is deleted.
     """
     now = utc_now_iso()
     adj_closes = adj_closes or {}
@@ -398,14 +625,23 @@ def replace_symbol_prices(data_dir: Path, symbol: str, rows: list[dict[str, Any]
     return str(db_path)
 
 
-def replace_split_events(data_dir: Path, symbol: str, events: list[tuple[str, float]], source: str) -> None:
-    """Replace a symbol's split events."""
+def replace_split_events(data_dir: Path, symbol: str, events: list[tuple[str, float]], source: str, after: str | None = None) -> None:
+    """Replace a symbol's split events, only those dated after ``after`` when it is given.
+
+    Events come from an adjust=none response, which can show a split only after its first date.
+    Rows older than the response stay in ohlcv (sync_symbol_prices), so their split events stay
+    in corporate_actions too and prices_daily.splits keeps them.
+    """
     ensure_db_schema(data_dir)
     now = utc_now_iso()
     con = _connect_db(data_dir)
     try:
         con.begin()
-        con.execute("DELETE FROM corporate_actions WHERE symbol = ? AND type = 'split'", [symbol])
+        if after is None:
+            con.execute("DELETE FROM corporate_actions WHERE symbol = ? AND type = 'split'", [symbol])
+        else:
+            con.execute("DELETE FROM corporate_actions WHERE symbol = ? AND type = 'split' AND date > CAST(? AS DATE)", [symbol, after])
+            events = [(day, value) for day, value in events if day > after]
         if events:
             con.executemany(
                 "INSERT INTO corporate_actions VALUES (?, CAST(? AS DATE), 'split', ?, ?, ?)",
@@ -505,6 +741,20 @@ def load_ohlcv_rows_for_symbols(con, symbols: Sequence[str]) -> dict[str, list[d
     ).fetchall()
     for record in result:
         rows_by_symbol[record[0]].append(_ohlcv_dict(record[1:]))
+    return rows_by_symbol
+
+
+def load_closes_for_symbols(con, symbols: Sequence[str]) -> dict[str, list[dict[str, Any]]]:
+    """Date-ordered {"date": ISO string, "close": float | None} rows for several symbols (indicator input)."""
+    rows_by_symbol: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in symbols}
+    if not symbols:
+        return rows_by_symbol
+    result = con.execute(
+        "SELECT symbol, date, close FROM ohlcv WHERE symbol IN (SELECT unnest(?)) ORDER BY symbol, date",
+        [list(symbols)],
+    ).fetchall()
+    for symbol, day, close in result:
+        rows_by_symbol[symbol].append({"date": day.isoformat(), "close": close})
     return rows_by_symbol
 
 

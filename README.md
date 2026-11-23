@@ -11,16 +11,16 @@ The design, budgets, and the stockpred data contract are in [`docs/DESIGN.md`](d
 - Core universe collected every trading day: 23 ETFs (`config/core_etfs.txt`) + current S&P 500 members + optional `config/core_extra.txt`.
 - Rotation universe collected with the remaining budget: the NASDAQ list (`config/symbols.txt`) plus symbols that left the S&P 500. Never-collected symbols first, then the stalest.
 - Weekly universe refresh (`src.universe`, sooner when the NASDAQ list is missing or empty): S&P 500 membership from the same public CSV stockpred uses, the NASDAQ list from Twelve Data, and delisted marks for symbols absent from Twelve Data's US catalogs (their rows are kept; they are no longer requested).
-- Twelve Data daily OHLCV with per-symbol full replacement (old split basis rows never linger), `adj_close` (dividend-adjusted close) for core symbols, and split events derived from raw vs split-adjusted prices.
+- Twelve Data daily OHLCV stored as a per-symbol diff: only new or changed rows are written, and rows older than the 5000-row response are kept and rebased when a split or dividend changes the basis (no row lingers on an old basis). `adj_close` (dividend-adjusted close) for core symbols, and split events derived from raw vs split-adjusted prices.
 - Credit-based budgets: per-key daily budgets with reserve, a per-run credit cap, server-side usage sync (`/api_usage`), UTC day rollover during a run, and sequential multi-key rotation.
 - Session awareness: bars of an unfinished session are never stored; NYSE holidays and one-off closures are handled.
 - Data rules (`src.data_rules`): bars on closed days and before a symbol's first valid date (`config/history_start.txt`) are dropped, verified bars missing from Twelve Data are inserted (`config/bar_patches.csv`), and stored dates that vanish from a response are reported. `src.ohlcv_cleanup` applies the same rules to rows already stored. Validation warns about core gaps not listed in `config/known_gaps.txt`, stale core symbols, closed-day bars, and unapplied patches.
 - Completion record (`collection_runs`, `symbol_status`) and an atomically replaced snapshot for readers.
 - DuckDB schema version 4: `ohlcv`/`indicators` store DATE/DOUBLE/BIGINT values (about half the size of the VARCHAR version 3). Bars are validated in Python before writing; a malformed value fails only that symbol. Typed view names, columns, and types are unchanged.
-- `market.db` rebuild (`src.rebuild`): the one-off v3 → v4 conversion, and a periodic rebuild into a new file when `market.db` grows past twice its size right after the last rebuild (deleted rows of daily full replacement are never reclaimed in place). Verified against the original before an atomic swap; the original is kept as a hard-linked backup.
+- `market.db` rebuild (`src.rebuild`): the one-off v3 → v4 conversion, and a periodic rebuild into a new file when `market.db` grows past twice its size right after the last rebuild (space of deleted or rewritten rows is never reclaimed in place). Verified against the original before an atomic swap; the original is kept as a hard-linked backup.
 - FRED macro series with `first_seen_at` (when an observation first appeared) and `series_meta` (copyright-restricted series are flagged personal-use only).
 - Finnhub company news with paging for truncated responses and per-symbol resumable windows, core symbols first.
-- Local technical indicators (SMA/RSI/MACD), recalculated only for symbols whose OHLCV changed.
+- Local technical indicators (SMA/RSI/MACD): price writers delete a symbol's indicator rows from the earliest changed close, and the indicator step fills only the missing dates.
 - Leakage-safe ML dataset export (`src.export_dataset`).
 - One pipeline lock (`data/state/pipeline.lock`, flock) shared by `scripts/run_daily.sh` and every CLI that writes data.
 - Dry-run mode that calls no collection API and writes no state or DB rows.
@@ -116,7 +116,7 @@ SELECT date, open, high, low, close, adj_close, volume, dividends, splits FROM p
 ## Local indicators
 
 ```bash
-.venv/bin/python -m src.indicators            # symbols whose OHLCV changed since their indicators were written
+.venv/bin/python -m src.indicators            # only dates without indicator rows
 .venv/bin/python -m src.indicators --full     # every symbol
 ```
 

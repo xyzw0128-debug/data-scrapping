@@ -16,7 +16,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlparse
 
-from src import main
+from src import main, storage
 from src.config import ProviderConfig
 from src.rate_limit import KeyPool, PerMinuteRateLimiter, RunCreditCap
 from src.twelve_data import BudgetExhaustedError, SymbolNotFoundError, TwelveDataClient, TwelveDataError, default_http_get
@@ -221,7 +221,7 @@ class CoreCollectionTest(unittest.TestCase):
         client, _, _ = _client(http_get)
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
-            main.replace_symbol_prices(data_dir, "NVDA", [{"date": "1999-01-04", "open": "1", "high": "1", "low": "1", "close": "1", "volume": "1"}])
+            storage.replace_symbol_prices(data_dir, "NVDA", [{"date": "1999-01-04", "open": "1", "high": "1", "low": "1", "close": "1", "volume": "1"}])
             # 2024-06-12 is newer than the finished session and must not be stored.
             result = main.collect_core_symbol(client, data_dir, "NVDA", "2024-06-11")
             events = main.refresh_split_events(client, data_dir, "NVDA", "2024-06-11")
@@ -235,9 +235,14 @@ class CoreCollectionTest(unittest.TestCase):
 
         self.assertEqual(result, {
             "rows": 4, "last_bar_date": "2024-06-11", "adj_ok": True, "split_basis_changed": False,
-            "dropped": {}, "patches": [], "vanished_dates": [],  # 1999-01-04 left the response window: not vanished
+            "dropped": {}, "patches": [], "vanished_dates": [],  # 1999-01-04 is older than the response: not vanished
+            # No overlapping date shows the basis of the 1999 row, so it is deleted rather than kept.
+            "storage": {
+                "inserted": 4, "updated": 0, "deleted": 1, "rebased": 0, "older_kept": 0, "older_dropped": 1,
+                "price_factor": None, "adj_factor": None, "indicator_from": "1999-01-04",
+            },
         })
-        self.assertEqual([str(d) for d in dates], ["2024-06-06", "2024-06-07", "2024-06-10", "2024-06-11"], "old 1999 row and unfinished bar are gone")
+        self.assertEqual([str(d) for d in dates], ["2024-06-06", "2024-06-07", "2024-06-10", "2024-06-11"], "unverifiable 1999 row and unfinished bar are gone")
         self.assertEqual(adj, adjusted_all["2024-06-07"])
         self.assertEqual(events, 1)
         self.assertEqual([(str(d), s) for d, _, _, s in prices], [("2024-06-06", 0.0), ("2024-06-07", 0.0), ("2024-06-10", 10.0), ("2024-06-11", 0.0)])
@@ -254,7 +259,7 @@ class CoreCollectionTest(unittest.TestCase):
         client, _, _ = _client(http_get)
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
-            main.replace_symbol_prices(data_dir, "AAA", [{"date": "2024-06-10", "open": "9", "high": "9", "low": "9", "close": "9", "volume": "1"}])
+            storage.replace_symbol_prices(data_dir, "AAA", [{"date": "2024-06-10", "open": "9", "high": "9", "low": "9", "close": "9", "volume": "1"}])
             with self.assertRaises(TwelveDataError):
                 main.collect_core_symbol(client, data_dir, "AAA", "2024-06-11")
             con = duckdb.connect(str(data_dir / "db" / "market.db"), read_only=True)
@@ -277,7 +282,7 @@ class CoreCollectionTest(unittest.TestCase):
         client, state, _ = _client(http_get, cap=20)
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
-            main.replace_symbol_prices(data_dir, "AAA", [{"date": "2024-06-07", "open": "9", "high": "9", "low": "9", "close": "9", "volume": "0"}])
+            storage.replace_symbol_prices(data_dir, "AAA", [{"date": "2024-06-07", "open": "9", "high": "9", "low": "9", "close": "9", "volume": "0"}])
             args = argparse.Namespace(dry_run=False, force=False, data_dir=data_dir, state=data_dir / "state" / "state.json")
             summary = {"started_at": "2024-06-12T00:00:00Z", "run_id": "test", "processed": 0, "failed": 0, "skipped_rate_limit": 0, "symbols": []}
             run = main.Run(args, state, summary, logging.getLogger("test"), client.cap)

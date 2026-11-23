@@ -2,8 +2,10 @@
 
 Phases (``--phase``):
 - core: ETFs + S&P 500 (+ config/core_extra.txt). Each symbol takes adjust=splits and
-  adjust=all full histories and replaces its rows in one transaction; then symbols without
-  split history (or whose split basis changed) get adjust=none to derive split events.
+  adjust=all full histories and writes only the rows that differ from the stored ones
+  (storage.sync_symbol_prices, one transaction); rows older than the response are kept and
+  rebased. Then symbols without split history (or whose split basis changed) get adjust=none
+  to derive split events.
 - rotation: the NASDAQ list and former core members, never-collected first, then the
   stalest. One adjust=splits call per symbol.
 
@@ -22,6 +24,7 @@ import json
 import logging
 import os
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 
 from src.config import load_provider_config
@@ -40,9 +43,9 @@ from src.storage import (
     load_closes,
     normalize_twelve_data_ohlcv,
     replace_split_events,
-    replace_symbol_prices,
     save_raw_latest,
     save_run_summary,
+    sync_symbol_prices,
     verify_writable,
 )
 from src.twelve_data import BudgetExhaustedError, SymbolNotFoundError, TwelveDataClient, TwelveDataError
@@ -55,6 +58,9 @@ SPLIT_SOURCE = "twelve_data_adjust_ratio"
 RUN_ID_ENV = "DATA_SCRAPPING_RUN_ID"
 CORE_SYMBOL_CREDITS = 2
 SAVE_EVERY = 5
+# Phase totals of storage.sync_symbol_prices: rows written (inserted, changed, rebased), rows
+# deleted, and rows older than a response deleted because their basis could not be checked.
+STORAGE_COUNTERS = {"rows_written": 0, "rows_deleted": 0, "older_dropped": 0}
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,8 +103,14 @@ def _close_map(rows: list[dict]) -> dict[str, float]:
     return closes
 
 
+def store_prices(data_dir: Path, symbol: str, rows: list[dict], rules: DataRules, adj_closes: dict | None = None) -> tuple[dict, dict]:
+    """Sync the symbol's stored rows with the response; returns (storage counts, stored closes before)."""
+    storage = sync_symbol_prices(data_dir, symbol, rows, adj_closes, keep_bar=partial(rules.keep_bar, symbol))
+    return storage, storage.pop("stored_closes")
+
+
 def collect_core_symbol(client: TwelveDataClient, data_dir: Path, symbol: str, session: str, rules: DataRules | None = None) -> dict:
-    """Fetch split-adjusted bars and adj_close for one core symbol and replace its rows.
+    """Fetch split-adjusted bars and adj_close for one core symbol and sync its stored rows.
 
     Nothing is written unless both calls succeed, so a failure leaves the old data intact.
     """
@@ -115,24 +127,27 @@ def collect_core_symbol(client: TwelveDataClient, data_dir: Path, symbol: str, s
     adj_closes = {row["date"]: row["close"] for row in bars_until(all_payload, session)}
     rows, adj_closes, patches = rules.apply_patches(symbol, rows, adj_closes)
 
-    stored = load_closes(data_dir, symbol)
+    storage, stored = store_prices(data_dir, symbol, rows, rules, adj_closes)
     changed = bool(stored) and split_basis_changed(stored, _close_map(rows))
     vanished = rules.vanished_dates(symbol, stored, rows)
-    replace_symbol_prices(data_dir, symbol, rows, adj_closes)
     last_bar = rows[-1]["date"]
     return {
         "rows": len(rows), "last_bar_date": last_bar, "adj_ok": last_bar in adj_closes, "split_basis_changed": changed,
-        "dropped": dropped, "patches": patches, "vanished_dates": vanished,
+        "dropped": dropped, "patches": patches, "vanished_dates": vanished, "storage": storage,
     }
 
 
 def refresh_split_events(client: TwelveDataClient, data_dir: Path, symbol: str, session: str) -> int:
-    """Derive split events from adjust=none vs the stored split-adjusted closes."""
+    """Derive split events from adjust=none vs the stored split-adjusted closes.
+
+    Only events after the response's first date are replaced: older events belong to rows the
+    response no longer covers, which stay stored.
+    """
     payload = client.time_series(symbol, "none")
     save_raw_latest(data_dir, f"{PROVIDER}/none", symbol, payload)
     raw = _close_map(bars_until(payload, session))
     events = split_events(raw, load_closes(data_dir, symbol))
-    replace_split_events(data_dir, symbol, events, SPLIT_SOURCE)
+    replace_split_events(data_dir, symbol, events, SPLIT_SOURCE, after=min(raw) if raw else None)
     return len(events)
 
 
@@ -144,9 +159,12 @@ def collect_rotation_symbol(client: TwelveDataClient, data_dir: Path, symbol: st
     if not rows:
         raise ValueError(f"No OHLCV rows on or before {session}")
     rows, _, patches = rules.apply_patches(symbol, rows)
-    vanished = rules.vanished_dates(symbol, load_closes(data_dir, symbol), rows)
-    replace_symbol_prices(data_dir, symbol, rows)
-    return {"rows": len(rows), "last_bar_date": rows[-1]["date"], "dropped": dropped, "patches": patches, "vanished_dates": vanished}
+    storage, stored = store_prices(data_dir, symbol, rows, rules)
+    vanished = rules.vanished_dates(symbol, stored, rows)
+    return {
+        "rows": len(rows), "last_bar_date": rows[-1]["date"], "dropped": dropped, "patches": patches,
+        "vanished_dates": vanished, "storage": storage,
+    }
 
 
 class Run:
@@ -229,6 +247,16 @@ class Run:
             if warn_vanished:
                 shown = ", ".join(vanished[:10]) + (" ..." if len(vanished) > 10 else "")
                 self.logger.warning("%s: %d stored date(s) missing from the new response: %s", symbol, len(vanished), shown)
+        storage = result["storage"]
+        bucket["rows_written"] += storage["inserted"] + storage["updated"] + storage["rebased"]
+        bucket["rows_deleted"] += storage["deleted"]
+        if storage["rebased"]:
+            detail["rebased"] = {"rows": storage["rebased"], "price_factor": storage["price_factor"], "adj_factor": storage["adj_factor"]}
+        if storage["older_dropped"]:
+            # The basis of rows older than the response could not be checked; they were deleted.
+            bucket["older_dropped"] += storage["older_dropped"]
+            detail["older_dropped"] = storage["older_dropped"]
+            self.logger.warning("%s: %d row(s) older than the response deleted (basis could not be checked)", symbol, storage["older_dropped"])
         return detail
 
 
@@ -238,7 +266,7 @@ def run_core(run: Run, client: TwelveDataClient, core: list[str], session: str) 
     pending = [s for s in core if args.force or provider_entry(state, s, PROVIDER).get("core_session") != session]
     bucket = run.summary["core"] = {
         "expected": len(core), "pending": len(pending), "done": 0, "failed": 0, "skipped": 0,
-        "dropped_bars": 0, "patched": 0, "vanished_dates": 0,
+        "dropped_bars": 0, "patched": 0, "vanished_dates": 0, **STORAGE_COUNTERS,
     }
     run.summary["current_phase"] = "core"
     run.summary["current_planned"] = len(pending)
@@ -309,7 +337,7 @@ def run_rotation(run: Run, client: TwelveDataClient, pool: list[str], exclude: s
     candidates = choose_rotation_symbols(pool, state, PROVIDER, max_symbols, today, args.force, exclude)
     bucket = run.summary["rotation"] = {
         "pool": len(pool), "candidates": len(candidates), "done": 0, "failed": 0, "skipped": 0,
-        "dropped_bars": 0, "patched": 0, "vanished_dates": 0,
+        "dropped_bars": 0, "patched": 0, "vanished_dates": 0, **STORAGE_COUNTERS,
     }
     run.summary["current_phase"] = "rotation"
     run.summary["current_planned"] = len(candidates)

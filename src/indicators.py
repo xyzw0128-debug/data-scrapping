@@ -1,10 +1,18 @@
-"""Local technical indicator calculation from OHLCV rows stored in DuckDB."""
+"""Local technical indicator calculation from OHLCV rows stored in DuckDB.
+
+Every OHLCV writer deletes a symbol's indicator rows from the earliest date whose close it
+changed (storage._drop_indicators_from), and an indicator at a date depends only on closes up to
+that date. So the default incremental run fills only the dates without an indicator row: it
+calculates the symbol's whole series and inserts the missing tail. ``--full`` and ``--symbol``
+rewrite every row of their symbols.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+from collections import deque
 from pathlib import Path
 
 from src.config import load_symbols
@@ -17,8 +25,8 @@ from src.storage import (
     ensure_data_dirs,
     ensure_db_schema,
     indicator_values,
+    load_closes_for_symbols,
     load_ohlcv_rows_db,
-    load_ohlcv_rows_for_symbols,
     save_indicator_rows_db,
 )
 
@@ -56,9 +64,15 @@ def _round_value(value: float | None) -> float | None:
 
 
 def calculate_sma(values: list[float | None], period: int) -> list[float | None]:
-    """Calculate simple moving averages."""
+    """Calculate simple moving averages, summing each window afresh.
+
+    A running sum would be O(N) instead of O(N x period), but its rounding differs in the last
+    bits and flips the 6-decimal rounding of stored values (2026-11-24 rehearsal: 14,712 of
+    about 1 million rows for 200 symbols) while saving only about 8 seconds a day. Fresh sums
+    keep new rows identical to a full recalculation of the stored ones.
+    """
     result: list[float | None] = []
-    window: list[float] = []
+    window: deque[float] = deque()
     for value in values:
         if value is None:
             result.append(None)
@@ -66,7 +80,7 @@ def calculate_sma(values: list[float | None], period: int) -> list[float | None]
             continue
         window.append(value)
         if len(window) > period:
-            window.pop(0)
+            window.popleft()
         result.append(sum(window) / period if len(window) == period else None)
     return result
 
@@ -192,35 +206,75 @@ def calculate_for_symbol(data_dir: Path, symbol: str) -> tuple[str, int, str | N
 
 
 def find_stale_symbols(con, symbols: list[str]) -> list[str]:
-    """Return symbols whose OHLCV rows were written after their indicators, in input order."""
+    """Return symbols with OHLCV dates that have no indicator row, in input order.
+
+    Indicator dates are always a subset of OHLCV dates (writers delete indicators with the
+    prices they change), so a different row count or last date means missing indicator rows.
+    """
     stale = {
         row[0]
         for row in con.execute(
             """
             SELECT o.symbol
-            FROM (SELECT symbol, max(updated_at) AS updated_at FROM ohlcv GROUP BY symbol) o
-            LEFT JOIN (SELECT symbol, max(updated_at) AS updated_at FROM indicators GROUP BY symbol) i USING (symbol)
-            WHERE i.updated_at IS NULL OR o.updated_at > i.updated_at
+            FROM (SELECT symbol, count(*) AS n, max(date) AS last_date FROM ohlcv GROUP BY symbol) o
+            LEFT JOIN (SELECT symbol, count(*) AS n, max(date) AS last_date FROM indicators GROUP BY symbol) i USING (symbol)
+            WHERE i.n IS NULL OR i.n <> o.n OR i.last_date <> o.last_date
             """
         ).fetchall()
     }
     return [symbol for symbol in symbols if symbol in stale]
 
 
-def calculate_batches(con, data_dir: Path, symbols: list[str], batch_size: int) -> list[dict[str, object]]:
-    """Calculate and store indicators for symbols, one transaction per batch."""
+def _missing_tail(rows: list[dict[str, object]], stored_count: int, stored_last: str | None) -> list[dict[str, object]] | None:
+    """Indicator rows after the stored ones, or None when the stored rows are not an intact prefix.
+
+    The stored rows are an intact prefix when they cover exactly the OHLCV dates up to their last
+    date; those values are unchanged (same closes up to that date), so only later rows are new.
+    """
+    if stored_last is None:
+        return rows if stored_count == 0 else None
+    if sum(1 for row in rows if str(row["date"]) <= stored_last) != stored_count:
+        return None
+    return [row for row in rows if str(row["date"]) > stored_last]
+
+
+def calculate_batches(con, data_dir: Path, symbols: list[str], batch_size: int, incremental: bool = False) -> list[dict[str, object]]:
+    """Calculate and store indicators for symbols, one transaction per batch.
+
+    Without ``incremental`` every row of each symbol is written. With it, only the dates after a
+    symbol's intact stored prefix are inserted; a symbol whose stored rows are not an intact
+    prefix (unexpected) has its indicator rows deleted and rewritten.
+    """
     results: list[dict[str, object]] = []
     for start in range(0, len(symbols), max(1, batch_size)):
         batch = symbols[start : start + max(1, batch_size)]
-        rows_by_symbol = load_ohlcv_rows_for_symbols(con, batch)
+        rows_by_symbol = load_closes_for_symbols(con, batch)
+        stored: dict[str, tuple[int, str]] = {}
+        if incremental:
+            stored = {
+                symbol: (count, str(last_date))
+                for symbol, count, last_date in con.execute(
+                    "SELECT symbol, count(*), max(date) FROM indicators WHERE symbol IN (SELECT unnest(?)) GROUP BY symbol", [batch]
+                ).fetchall()
+            }
         updated_at = utc_now_iso()
         values: list[list[object]] = []
+        rewrite: list[str] = []
         for symbol in batch:
-            rows = rows_by_symbol.get(symbol, [])
-            values.extend(indicator_values(symbol, add_indicators(rows), updated_at))
-            results.append({"symbol": symbol, "status": "done", "rows": len(rows)})
+            computed = add_indicators(rows_by_symbol.get(symbol, []))
+            if incremental:
+                count, last_date = stored.get(symbol, (0, None))
+                tail = _missing_tail(computed, count, last_date)
+                if tail is None:
+                    rewrite.append(symbol)
+                else:
+                    computed = tail
+            values.extend(indicator_values(symbol, computed, updated_at))
+            results.append({"symbol": symbol, "status": "done", "rows": len(computed)})
         con.begin()
         try:
+            if rewrite:
+                con.execute("DELETE FROM indicators WHERE symbol IN (SELECT unnest(?))", [rewrite])
             bulk_upsert(con, data_dir, "indicators", INDICATOR_COLUMNS, ["symbol", "date"], values)
             con.commit()
         except Exception:
@@ -246,7 +300,7 @@ def run(args: argparse.Namespace) -> dict:
             symbols = sorted(with_ohlcv)
         candidates = [symbol for symbol in symbols if symbol in with_ohlcv]
         targets = candidates if mode != "incremental" else find_stale_symbols(con, candidates)
-        results = calculate_batches(con, args.data_dir, targets, args.batch_size)
+        results = calculate_batches(con, args.data_dir, targets, args.batch_size, incremental=mode == "incremental")
     finally:
         con.close()
 

@@ -30,8 +30,8 @@ systemd/
 - `src/snapshot.py`: 완료 판정(`complete/partial/failed`), `symbol_status`·`collection_runs` 기록, `market_snapshot.db` 원자적 교체.
 - `src/fred.py`: FRED 관측값(`first_seen_at` 보존 업서트), 시리즈 메타(`series_meta`, 권리 문구 감지), `data/state/fred.json`.
 - `src/finnhub_news.py`: Finnhub 뉴스. 잘린 응답 페이지 나눠 받기, 종목별 이어받기 창, 핵심 종목 우선.
-- `src/indicators.py`: OHLCV가 바뀐 종목만 SMA/RSI/MACD 재계산(기본은 OHLCV가 있는 모든 종목).
-- `src/storage.py`: DuckDB 스키마 버전 4 생성·버전 확인(다른 버전은 `SchemaVersionError`), 뷰(`*_typed`, `prices_daily`), OHLCV 값 정규화(날짜 ISO·유한 실수·정수 거래량), 테이블 타입으로 읽는 배치 업서트, 종목 통째 교체, 분할 이벤트 저장, gzip 원본 저장.
+- `src/indicators.py`: 지표 행이 없는 날짜만 SMA/RSI/MACD 계산해 넣음(종목 전체 시계열로 계산, `--full`·`--symbol`은 종목 전체 다시 씀).
+- `src/storage.py`: DuckDB 스키마 버전 4 생성·버전 확인(다른 버전은 `SchemaVersionError`), 뷰(`*_typed`, `prices_daily`), OHLCV 값 정규화(날짜 ISO·유한 실수·정수 거래량), 테이블 타입으로 읽는 배치 업서트, 바뀐 행만 쓰는 종목 저장(`sync_symbol_prices`: 응답보다 오래된 행은 남기고 분할·배당 배율로 다시 맞춤, 바뀐 종가 날짜부터 지표 삭제), 분할 이벤트 저장, gzip 원본 저장.
 - `src/rebuild.py`: `market.db`를 새 파일로 재구성(잠금 안 `CHECKPOINT` → 같은 디렉터리 임시 파일 → 원본과 비교 검증 → 하드링크 백업 → `os.replace`). `--to-v4`(스키마 버전 3 → 4 변환, 1회), `--if-needed`(마지막 재구성 직후 크기의 2배를 넘으면 정기 재구성).
 - `src/lock.py`: 파이프라인 잠금(flock). `run_daily.sh`가 잡으면 하위 CLI는 상속하고, 단독 실행 CLI는 직접 잡습니다.
 - `src/export_dataset.py`: 시점 누수 없는 ML 데이터셋 내보내기(개인용 FRED 시리즈 기본 제외).
@@ -50,7 +50,7 @@ systemd/
 
 - 수집기는 원본 응답을 `data/raw/<provider>/`에 종목·시리즈별 최신 1개(gzip)로 남깁니다.
 - 정규화된 데이터는 DuckDB 단일 파일(`data/db/market.db`)의 `ohlcv`, `indicators`, `macro`, `news`, `corporate_actions`, `series_meta` 테이블에 저장됩니다. 스키마 버전 4에서 `ohlcv`·`indicators`는 날짜를 `DATE`, 값을 `DOUBLE`/`BIGINT`로 저장합니다.
-- 종목 통째 교체로 지운 행의 공간은 파일에 남으므로, 파일이 마지막 재구성 직후 크기의 2배를 넘으면 `src.rebuild`가 새 파일로 다시 만듭니다.
+- 지우거나 바꾼 행의 공간은 파일에 남으므로, 파일이 마지막 재구성 직후 크기의 2배를 넘으면 `src.rebuild`가 새 파일로 다시 만듭니다. 2026-11-24부터는 바뀐 행만 쓰므로 늘어나는 속도가 크게 줄었습니다.
 - 스냅숏 단계가 `symbol_status`, `collection_runs`를 기록하고 `market_snapshot.db`로 복사합니다. stockpred는 스냅숏만 읽습니다.
 
 ## 상태 파일 구조 요약
