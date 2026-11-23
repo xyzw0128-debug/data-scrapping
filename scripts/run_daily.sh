@@ -26,6 +26,8 @@ FINNHUB_LIMIT="${FINNHUB_LIMIT:-}"
 FINNHUB_DAYS_BACK="${FINNHUB_DAYS_BACK:-365}"
 FINNHUB_PER_MINUTE="${FINNHUB_PER_MINUTE:-50}"
 FINNHUB_MAX_PAGES="${FINNHUB_MAX_PAGES:-10}"
+# Non-core symbols wait 1, 2, 4, 7 days after 1, 2, 3, 4+ consecutive runs without new articles; "1" = every run.
+FINNHUB_BACKOFF_DAYS="${FINNHUB_BACKOFF_DAYS:-1,2,4,7}"
 ALPHA_VANTAGE_MAX_SYMBOLS="${ALPHA_VANTAGE_MAX_SYMBOLS:-2}"
 UNIVERSE_MAX_AGE_DAYS="${UNIVERSE_MAX_AGE_DAYS:-7}"
 RUN_UNIVERSE="${RUN_UNIVERSE:-1}"
@@ -167,7 +169,7 @@ fi
 
 if [[ "$RUN_FINNHUB" == "1" ]]; then
   log_step "Collecting Finnhub company news"
-  finnhub_args=(--days-back "$FINNHUB_DAYS_BACK" --per-minute-limit "$FINNHUB_PER_MINUTE" --max-pages "$FINNHUB_MAX_PAGES")
+  finnhub_args=(--days-back "$FINNHUB_DAYS_BACK" --per-minute-limit "$FINNHUB_PER_MINUTE" --max-pages "$FINNHUB_MAX_PAGES" --backoff-days "$FINNHUB_BACKOFF_DAYS")
   if [[ -n "$FINNHUB_LIMIT" ]]; then
     finnhub_args+=(--limit "$FINNHUB_LIMIT")
   fi

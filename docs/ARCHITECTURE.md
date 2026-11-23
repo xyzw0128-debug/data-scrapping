@@ -29,7 +29,7 @@ systemd/
 - `src/corporate_actions.py`: `adjust=none`/`adjust=splits` 종가 비율로 분할 이벤트 계산, 분할 기준 변경 감지.
 - `src/snapshot.py`: 완료 판정(`complete/partial/failed`), `symbol_status`·`collection_runs` 기록, 잠정 봉 표시 뷰(`bar_status`), `market_snapshot.db` 원자적 교체.
 - `src/fred.py`: FRED 관측값(`first_seen_at` 보존 업서트), 시리즈 메타(`series_meta`, 권리 문구 감지), `data/state/fred.json`.
-- `src/finnhub_news.py`: Finnhub 뉴스. 잘린 응답 페이지 나눠 받기, 종목별 이어받기 창, 핵심 종목 우선.
+- `src/finnhub_news.py`: Finnhub 뉴스. 잘린 응답 페이지 나눠 받기, 종목별 이어받기 창, 핵심 종목 우선(매 실행), 나머지는 새 기사 없는 실행이 이어지면 1·2·4·7일 간격.
 - `src/indicators.py`: 지표 행이 없는 날짜만 SMA/RSI/MACD 계산해 넣음(종목 전체 시계열로 계산, `--full`·`--symbol`은 종목 전체 다시 씀).
 - `src/storage.py`: DuckDB 스키마 버전 4 생성·버전 확인(다른 버전은 `SchemaVersionError`), 뷰(`*_typed`, `prices_daily`), OHLCV 값 정규화(날짜 ISO·유한 실수·정수 거래량), 테이블 타입으로 읽는 배치 업서트, 바뀐 행만 쓰는 종목 저장(`sync_symbol_prices`: 응답보다 오래된 행은 남기고 분할·배당 배율로 다시 맞춤, 바뀐 종가 날짜부터 지표 삭제), 분할 이벤트 저장, gzip 원본 저장.
 - `src/rebuild.py`: `market.db`를 새 파일로 재구성(잠금 안 `CHECKPOINT` → 같은 디렉터리 임시 파일 → 원본과 비교 검증 → 하드링크 백업 → `os.replace`). `--to-v4`(스키마 버전 3 → 4 변환, 1회), `--if-needed`(마지막 재구성 직후 크기의 2배를 넘으면 정기 재구성).
@@ -66,5 +66,5 @@ systemd/
 그 밖의 상태 파일
 - `universe.json`: S&P 500 목록과 기준일, `former_core`, `delisted`, 마지막 갱신 시각.
 - `fred.json`: 시리즈별 `last_success_at`(완료 판정에 사용).
-- `finnhub_news.json`: 종목별 `last_to`, 이어받기 창(`window_from`, `window_to`, `cursor_to`), `last_attempt_at`.
+- `finnhub_news.json`: 종목별 `last_to`, 이어받기 창(`window_from`, `window_to`, `cursor_to`), `last_attempt_at`, `rows`·`new_rows`(응답 건수·새 기사 수), `zero_streak`(새 기사 없는 연속 실행 수), `next_check_date`(다음 조회 뉴욕 날짜, 비어 있거나 없으면 매 실행).
 - `db_maintenance.json`: `baseline_bytes`(마지막 재구성 직후 `market.db` 크기, 정기 재구성 기준), `last_rebuild`, `history`(최근 20회: 방식, 전후 크기, 백업 경로, 소요 시간). 기준이 없을 때 처음 기록하면 `baseline_initialized_at`.
