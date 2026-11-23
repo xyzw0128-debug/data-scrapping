@@ -3,7 +3,8 @@
 DuckDB lets no other process open a database file while one process has it open for
 writing (not even read-only), so stockpred reads data/db/market_snapshot.db instead.
 Under the pipeline lock this module records symbol_status and a collection_runs row in
-market.db, checkpoints, copies the file, verifies the copy, and swaps it in atomically.
+market.db (with the bar_status view that flags preliminary last bars), checkpoints, copies the
+file, verifies the copy, and swaps it in atomically.
 """
 
 from __future__ import annotations
@@ -30,6 +31,22 @@ RUN_ID_ENV = "DATA_SCRAPPING_RUN_ID"
 RUN_STARTED_ENV = "DATA_SCRAPPING_RUN_STARTED_AT"
 # Without a run start time, FRED series count as fresh when fetched within this window.
 DEFAULT_FRED_WINDOW = timedelta(hours=20)
+
+# A daily bar fetched on the evening of its own session is Twelve Data's preliminary value. Right
+# after the close its volume covers only about 5% of the market; hours later close and volume are
+# close to final, but open/high/low and volume can still differ until the consolidated end-of-day
+# data is published the next day (2026-10/11 measurements: not yet at 05:00 New York, final by the
+# next 16:10 New York run). symbol_status holds when each symbol was last fetched, so a symbol's
+# last bar is provisional until it was fetched again at or after 21:10 UTC on the next calendar
+# day: 16:10 New York in winter, an hour later than needed in summer. NULL means unknown (no bar
+# or no fetch time). Every earlier bar of the symbol is final. Deterministic, so src.rebuild can
+# checksum it; plain UTC arithmetic, so readers need no time zone extension.
+BAR_STATUS_VIEW_SQL = """
+    SELECT symbol, group_name, last_bar_date, last_success_at,
+           CAST(last_bar_date AS TIMESTAMP) + INTERVAL 45 HOUR + INTERVAL 10 MINUTE AS final_after_utc,
+           TRY_CAST(replace(last_success_at, 'Z', '') AS TIMESTAMP)
+               < CAST(last_bar_date AS TIMESTAMP) + INTERVAL 45 HOUR + INTERVAL 10 MINUTE AS provisional
+    FROM symbol_status"""
 
 
 def fred_state_path(data_dir: Path) -> Path:
@@ -167,6 +184,9 @@ def create_snapshot(
             "INSERT INTO symbol_status VALUES (?, ?, ?, ?, ?, CAST(? AS DATE), ?, CAST(? AS DATE), ?, ?)",
             symbol_status_rows(universe, state, last_bars, now_iso),
         )
+        # Created here rather than with the typed views (src.storage) because it describes the
+        # symbol_status rows this module writes; src.rebuild copies it with the other views.
+        con.execute(f"CREATE OR REPLACE VIEW bar_status AS {BAR_STATUS_VIEW_SQL}")
         con.execute(
             """INSERT OR REPLACE INTO collection_runs
                (run_id, phase, started_at, finished_at, session_date, status, core_expected, core_ok, missing_symbols,

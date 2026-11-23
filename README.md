@@ -13,7 +13,7 @@ The design, budgets, and the stockpred data contract are in [`docs/DESIGN.md`](d
 - Weekly universe refresh (`src.universe`, sooner when the NASDAQ list is missing or empty): S&P 500 membership from the same public CSV stockpred uses, the NASDAQ list from Twelve Data, and delisted marks for symbols absent from Twelve Data's US catalogs (their rows are kept; they are no longer requested).
 - Twelve Data daily OHLCV stored as a per-symbol diff: only new or changed rows are written, and rows older than the 5000-row response are kept and rebased when a split or dividend changes the basis (no row lingers on an old basis). `adj_close` (dividend-adjusted close) for core symbols, and split events derived from raw vs split-adjusted prices.
 - Credit-based budgets: per-key daily budgets with reserve, a per-run credit cap, server-side usage sync (`/api_usage`), UTC day rollover during a run, and sequential multi-key rotation.
-- Session awareness: bars of an unfinished session are never stored; NYSE holidays and one-off closures are handled.
+- Session awareness: bars of an unfinished session are never stored; NYSE holidays and one-off closures are handled. A session's bar fetched before the next day is Twelve Data's preliminary value; the snapshot's `bar_status` view flags it.
 - Data rules (`src.data_rules`): bars on closed days and before a symbol's first valid date (`config/history_start.txt`) are dropped, verified bars missing from Twelve Data are inserted (`config/bar_patches.csv`), and stored dates that vanish from a response are reported. `src.ohlcv_cleanup` applies the same rules to rows already stored. Validation warns about core gaps not listed in `config/known_gaps.txt`, stale core symbols, closed-day bars, and unapplied patches.
 - Completion record (`collection_runs`, `symbol_status`) and an atomically replaced snapshot for readers.
 - DuckDB schema version 4: `ohlcv`/`indicators` store DATE/DOUBLE/BIGINT values (about half the size of the VARCHAR version 3). Bars are validated in Python before writing; a malformed value fails only that symbol. Typed view names, columns, and types are unchanged.
@@ -24,7 +24,7 @@ The design, budgets, and the stockpred data contract are in [`docs/DESIGN.md`](d
 - Leakage-safe ML dataset export (`src.export_dataset`).
 - One pipeline lock (`data/state/pipeline.lock`, flock) shared by `scripts/run_daily.sh` and every CLI that writes data.
 - Dry-run mode that calls no collection API and writes no state or DB rows.
-- systemd user timer (16:10 New York time, Mon–Fri), progress monitor, daily summary with host healthcheck, DuckDB validation, Discord status, optional rclone backup.
+- systemd user timer (01:10 UTC Tue–Sat: the New York evening of each weekday, 20:10 in winter and 21:10 in summer), progress monitor, daily summary with host healthcheck, DuckDB validation, Discord status, optional rclone backup.
 
 ## Layout
 
@@ -84,7 +84,7 @@ Provider budgets live in `config/providers.yaml`. Twelve Data: 800 credits/day p
 
 ```bash
 DRY_RUN=1 scripts/run_daily.sh   # plan only: no collection API calls, no state/DB writes
-scripts/run_daily.sh             # real run (the timer does this at 16:10 New York time)
+scripts/run_daily.sh             # real run (the timer does this at 01:10 UTC, Tue–Sat)
 ```
 
 Stages: universe refresh (weekly) → Twelve Data core → FRED → core snapshot → Twelve Data rotation → Alpha Vantage (optional) → indicators → Finnhub news → DuckDB validation → summary (with this run's validation result) → `market.db` rebuild (only past twice the size after the last rebuild) → full snapshot → optional backup. Each stage has a `RUN_*` toggle in `.env` (see `.env.example`). Alpha Vantage is off by default (`RUN_ALPHA_VANTAGE=0`): its daily prices are not split-adjusted and go into the same `ohlcv` table, so enabling it mixes price bases. A failing stage is reported and the remaining stages still run; the script exits non-zero at the end if any stage failed. A failed Discord status update (`SEND_DISCORD=1`) is logged and never stops the run.
@@ -102,15 +102,19 @@ Stages: universe refresh (weekly) → Twelve Data core → FRED → core snapsho
 .venv/bin/python -m src.snapshot --phase full               # completion record + market_snapshot.db
 ```
 
-Each CLI takes the pipeline lock and exits with code 2 and `{"status": "lock_held"}` while another run is in progress. A run started at any time stores bars only up to the latest finished session (16:10 New York time on NYSE trading days).
+Each CLI takes the pipeline lock and exits with code 2 and `{"status": "lock_held"}` while another run is in progress. A run started at any time stores bars only up to the latest finished session (16:10 New York time on NYSE trading days). That session's bar stays Twelve Data's preliminary value until the next day: right after the close its volume covers about 5% of the market, and hours later close and volume are near final while open/high/low can still differ. The timer starts hours after the close for that reason (see `docs/DESIGN.md` sections 2 and 4).
 
 ## Snapshot for stockpred
 
-Read `data/db/market_snapshot.db` read-only; never open `market.db` from another process while collectors run (DuckDB refuses a second process). Useful objects: `prices_daily` (stockpred `STD_COLS` names), `corporate_actions`, `symbol_status`, `collection_runs`, `macro_typed`, `news_typed`, `series_meta`.
+Read `data/db/market_snapshot.db` read-only; never open `market.db` from another process while collectors run (DuckDB refuses a second process). Useful objects: `prices_daily` (stockpred `STD_COLS` names), `bar_status` (whether each symbol's last bar is still preliminary), `corporate_actions`, `symbol_status`, `collection_runs`, `macro_typed`, `news_typed`, `series_meta`.
 
 ```sql
 SELECT status, session_date, core_ok, core_expected FROM collection_runs ORDER BY finished_at DESC LIMIT 1;
 SELECT date, open, high, low, close, adj_close, volume, dividends, splits FROM prices_daily WHERE symbol = 'NVDA' ORDER BY date;
+-- final bars only: a symbol's last bar is provisional until it is fetched again after 21:10 UTC the next day
+SELECT p.* FROM prices_daily p
+LEFT JOIN bar_status b ON b.symbol = p.symbol AND b.last_bar_date = p.date AND b.provisional
+WHERE b.symbol IS NULL;
 ```
 
 ## Local indicators
