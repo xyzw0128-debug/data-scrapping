@@ -98,7 +98,7 @@
 - [x] 리허설(운영 스냅숏 사본, NVMe, `systemd-run MemoryMax=5G`): 변환 2,273MB → 1,118MB, 23.1초(검증 5.0초), 최대 RSS 2.2GB. 독립 스크립트로 비교한 뷰 5개 행 수·열 타입·체크섬, NVDA(2007-09-11 1.5, 2021-07-20 4.0, 2024-06-10 10.0)·AAPL(2014-06-09 7.0, 2020-08-31 4.0) 분할 이벤트(저장값, `load_closes` + `split_events` 재계산, `prices_daily.splits`)가 변환 전과 같음. 운영 원본으로 핵심 526종목 교체 2회 실패 0건(1,174 → 1,172MB), 지표 재계산 526종목 36초·옛 값과 차이 0행, 재현 후에도 `prices_daily` 행 단위 동일. 정기 재구성 1,315MB → 1,113MB, 16.3초, 최대 RSS 2.3GB. 재구성 뒤 하루 주기(핵심 526종목 교체 + 지표 재계산)를 3번 재현하면 1,113 → 1,234 → 1,300 → 1,383MB(주기당 약 70~120MB, 순환·뉴스 제외)라 2배 기준(2,226MB)에는 대략 2~3주 뒤 닿습니다. 재현 사본의 `src.validate_duckdb` 이슈 0건
 - [x] 백업 보관 개수 2개(2026-10-21 결정): 재구성이 성공한 뒤에만 `market.db.bak-*` 중 최신 2개(이번 백업 포함)를 남기고 나머지 삭제(`--keep-backups`, 실패한 재구성은 삭제하지 않음, 지운 목록은 `pruned_backups`)
 - [x] 운영 반영(2026-10-21 15:05~15:08 KST, 수집 대기 중): 운영 폴더 `main` fast-forward(ae4dc9d → 73636d7) → `src.rebuild --to-v4`: 2,273MB → 1,120MB, 22.9초(검증 4.7초), 최대 RSS 2.16GB(`systemd-run MemoryMax=5G`). 독립 스크립트 비교에서 테이블 행 수, 뷰 5개 열·타입·체크섬(`prices_daily` 10,158,942행), NVDA·AAPL 분할 이벤트가 변환 전과 같음 → `src.snapshot --phase full`(스냅숏도 버전 4, 상태는 변환 전과 같은 `partial`: 핵심 524/526, 분할 이력 348, 누락 PSKY·WBD)
-- [ ] 변환 백업(`data/db/market.db.bak-2026-10-21`, 2.27GB) 2026-10-28쯤 운영 확인 후 삭제
+- [x] 변환 백업(`data/db/market.db.bak-2026-10-21`, 2.27GB) 삭제: 2026-11-24 운영 재구성의 백업 2개 규칙으로 정리됨(차분 저장 절)
 
 ## 2026-10-22 두 번째 타이머 실행 후속 수정
 - [x] `src.fred`: FRED 점검 중 응답(HTTP 200 + HTML "Site Maintenance | St. Louis Fed")에 16개 시리즈가 모두 `Expecting value: line 1 column 1 (char 0)`으로 실패하던 것을, JSON이 아닌 응답이면 `FredUnavailable`(HTTP 상태·Content-Type·HTML 제목)로 기록하도록 수정. 한 번 만나면 남은 시리즈는 요청하지 않고 `not requested: ...`로 실패 기록, 결과 JSON에 `unavailable`. 단계 종료 코드 1과 완료 판정(`missing_series`)은 그대로
@@ -164,7 +164,8 @@
 - [x] 테스트 125개 통과(차분 계획 15가지: 같은 응답, 잠정 봉 수정, 거래량만 수정, 배당, 사라진 날짜, 옛 행 보존·분할·작은 배당 5e-5·잡음 1e-7·앵커 안 이벤트·앵커 하나 수정·겹침 부족·규칙 위반·순환 기준. DB 경로: 안 바뀐 행 `updated_at` 유지, 이상 값이면 무변경, 핵심 수집 옛 행 리베이스·옛 분할 이벤트 유지. 지표: 빠진 행만 삽입 = 전체 계산, 구멍 난 앞부분 다시 쓰기, SMA 비트 동일)
 - [x] 리허설(10-28 백업 사본을 재구성해 1,359MB, NVMe, `systemd-run MemoryMax=4G`, 11-03 실행의 원본 응답 재생): 핵심 526종목 135.8초·순환 697종목 79초, 실패 0. 핵심 삽입 2,618·교체 125,935(배당 28종목)·옛 행 보존 2,080(리베이스 110, 22종목 배당), 순환 삽입 4,618·교체 1,398·삭제 28·보존 873, `older_dropped` 0. 지표 단계 1,199종목 9,266행 18.6초(통째 교체 때 약 381만 행 54초). 파일 1,359 → 1,401 → 1,409MB(+50MB, 다섯 세션치 핵심 변화 포함). 운영 스냅숏(같은 응답을 통째 교체한 결과)과 비교: 스냅숏 행 3,812,863개 모두 6개 값 동일, 리허설에만 있는 2,953행(559종목)은 모두 스냅숏 첫 날짜보다 오래된 행, 분할 이벤트 307 = 307, 지표 3,815,816행 전체 재계산과 차이 0
 - [x] 같은 응답 재생(바뀐 것 없음): 1,223종목 모두 쓰기 0(보존 행 2,953 그대로), 지표 처리 0종목, 파일 1,407,463,424바이트 그대로. worktree `DRY_RUN=1 scripts/run_daily.sh`(빈 데이터) 실패 단계 없음
-- [ ] 운영 반영(수집이 돌지 않을 때): `main` fast-forward → `DRY_RUN=1 scripts/run_daily.sh` → `src.rebuild`(2.69GB → 약 1.4GB, 백업 2개 규칙) → 첫 실행 뒤 `rows_written`·파일 증가량·`validate_duckdb` 확인
+- [x] 운영 반영(2026-11-24 09:52~09:54 KST, 수집 대기 중·타이머 꺼짐): 운영 폴더 `main` fast-forward(f7f53e1 → bedb065, 같은 날의 `bar_status`·Finnhub 간격·옛 raw 보관 문서·작은 수정·`core_exclude` 포함) → `git push origin main` → 운영 폴더 테스트 163개 통과 → `SEND_DISCORD=0 RUN_SUMMARY=0 DRY_RUN=1 scripts/run_daily.sh` 실패 단계 없음(기준 거래일 11-23, 핵심 524종목, 순환 700, 뉴스 4,899) → `src.rebuild`(`systemd-run MemoryMax=5G`): 2,690,396,160 → 1,433,153,536바이트, 24.4초(검증 4.5초), 백업 `market.db.bak-2026-11-24`, `bak-2026-10-21` 정리, 기준 크기 1,433,153,536. 스냅숏은 다음 실행이 게시(지금 게시하면 11-23 봉이 없는 `collection_runs` 행이 생김)
+- [ ] 타이머 재가동(사용자 결정) 뒤 첫 실행 확인: `rows_written`·`rows_deleted`·`older_dropped`, `market.db` 증가량(1,433MB 기준), 지표 단계 처리 종목·행 수, `validate_duckdb` 이슈 0. 첫 실행은 11-04 이후 빈 세션을 채우므로 평소보다 많이 씀
 - stockpred 영향: `prices_daily` 열 이름·의미 그대로. 응답보다 오래된 행이 남아 20년 넘는 종목의 이력이 거래일마다 1행씩 길어지고, 분할·배당 때 옛 행도 같은 배율로 다시 맞춰짐
 - 범위 밖(별도 작업): 정체 핵심 종목(WBD·PSKY·KVUE). 시작 시각(잠정 봉)·Finnhub 조회 간격·옛 raw 보관은 같은 날 각 절
 
@@ -222,7 +223,8 @@
   - 이어 준다면 `PSKY 2026-10-16 ...`를 제외 파일에 넣습니다. 10-06으로 쓰면 10-07~10-16 봉 때문에 `core_exclude_active`가 남습니다.
   - 이어 주지 않으면 stockpred 쪽 PSKY → SKYD 매핑이 필요합니다.
 - [ ] 제안: S&P 새 구성종목 TWLO(10-06~, DB에 행 0)·OKTA(11-04~, 순환 종목)를 `config/core_extra.txt`에 넣기(사용자 결정). 핵심 1종목은 하루 2크레딧이고, 처음에는 분할 이력 1크레딧이 더 듭니다. 공개 목록이 따라오면 중복은 무해합니다.
-- [ ] 운영 반영(사용자 확인 뒤): 운영 폴더 `main`이 차분 저장 병합 브랜치(ab38ed1)로 앞당겨진 뒤 이 브랜치를 fast-forward. 다음 실행의 `collection_runs`에서 `core_expected` 524, `missing_symbols`에 PSKY만 남는지 확인
+- [x] 운영 반영: 2026-11-24 운영 폴더 `main` fast-forward(bedb065, 차분 저장 절의 운영 반영과 함께). dry-run에서 `core_excluded` KVUE·WBD, 핵심 524종목 확인
+- [ ] 다음 실행의 `collection_runs`에서 `core_expected` 524, `missing_symbols`에 PSKY만 남는지 확인
 - 범위 밖: `core_symbols()`가 `delisted`를 거르게 바꾸는 것과 `relisted` 처리 수정(방안 A·C), S&P 목록 지연 자동 대응
 
 ## 이전 다음 작업
