@@ -13,7 +13,7 @@
 
 | 그룹 | 종목 | 받는 것 | 주기 |
 |---|---|---|---|
-| 핵심 | ETF 23개(`config/core_etfs.txt`) + S&P 500 현재 구성종목 + `config/core_extra.txt`(선택) | 분할 반영 OHLCV, `adj_close`, 분할 이벤트, 뉴스 | 매 거래일 |
+| 핵심 | ETF 23개(`config/core_etfs.txt`) + S&P 500 현재 구성종목 + `config/core_extra.txt`(선택) − `config/core_exclude.txt` | 분할 반영 OHLCV, `adj_close`, 분할 이벤트, 뉴스 | 매 거래일 |
 | 순환 | NASDAQ 목록(`config/symbols.txt`) + S&P에서 빠진 옛 구성종목 | 분할 반영 OHLCV, 뉴스 | 남는 예산으로 돌아가며 |
 | 거시 | FRED 16개(`config/fred_series.txt`) | 관측값, 시리즈 메타 | 매 실행 |
 
@@ -21,7 +21,13 @@
 
 - S&P 500: stockpred와 같은 출처(fja05680/sp500 GitHub CSV)의 마지막 행. 빠진 종목은 `former_core`로 옮겨 순환 수집을 계속합니다.
 - NASDAQ: Twelve Data `/stocks?exchange=NASDAQ`(0크레딧)로 `config/symbols.txt`를 갱신합니다.
-- 상장폐지: Twelve Data 미국 전체 주식·ETF 카탈로그 어디에도 없는 종목을 `delisted`로 표시하고 더 이상 요청하지 않습니다. 이미 쌓인 행은 지우지 않습니다.
+- 상장폐지: Twelve Data 미국 전체 주식·ETF 카탈로그 어디에도 없는 종목을 `delisted`로 표시하고 더 이상 요청하지 않습니다. 이미 쌓인 행은 지우지 않습니다. 이 표시는 순환·뉴스·`symbol_status.active`에만 쓰고 핵심 목록은 거르지 않습니다. 카탈로그에 다시 나타나면 표시를 지웁니다(`relisted`).
+- 핵심 제외(`config/core_exclude.txt`, 2026-11-24): 거래가 끝났거나 티커가 바뀌었는데 S&P 공개 목록(또는 `core_etfs.txt`)에 남아 있는 핵심 종목을 사람이 확인해 뺍니다. 공개 목록은 몇 주씩 늦고(2026-11-24 기준 11주째 갱신 없음), Twelve Data 카탈로그는 끝난 티커를 오래 들고 있어 `delisted`로는 잡히지 않기 때문입니다. 그대로 두면 새 봉이 없는 종목을 매일 2크레딧씩 다시 받고 `collection_runs`가 계속 `partial`입니다.
+  - 형식: `SYMBOL YYYY-MM-DD 이유`(주석 `#`, git 추적). 날짜는 거래가 끝나거나 티커가 바뀐 날이고, 오늘(UTC)보다 늦을 수 없으며 거래일이 아니어도 됩니다. 그 날짜 뒤의 봉은 기대하지 않습니다.
+  - 잘못된 줄(형식, 날짜, 기호, 중복, 미래 날짜)이나 `core_extra.txt`와 겹치는 종목이 있으면 종목 목록을 읽는 모든 CLI(`src.main`·`src.universe`·`src.snapshot`·`src.finnhub_news`)가 API를 부르기 전에 `data_rules_invalid`(종료 코드 1)로 멈춥니다. `src.validate_duckdb`는 이슈로 기록합니다.
+  - 효과: 제외 종목은 핵심·순환·뉴스 대상과 `core_expected`에서 빠집니다. 저장된 행은 그대로 두고(다시 받지 않음), `symbol_status`에는 원래 그룹(`core_sp500` 등)·`active=false`·`delisted_at`=제외일로 남습니다. `universe.json`에는 쓰지 않으므로 주간 갱신(`relisted` 포함)이 지우지 않습니다.
+  - 안전장치: 핵심 단계는 어느 핵심 목록에도 없게 된 제외 종목에 "제외 줄 삭제 가능" INFO 로그를 남깁니다(S&P 목록이 490개 이상 적재돼 있을 때만). 줄을 지우면 그 종목은 옛 구성종목으로 순환에 돌아가므로, 카탈로그에서 빠져 `delisted`가 될 때까지 순환 차례마다 1크레딧을 씁니다. 실행 요약 `core_exclude`에 제외 목록과 `removable`이 남습니다. 검증 경고 `core_exclude_active`는 제외 종목이 실제로 정체가 아닐 때(4절) 남습니다.
+  - 첫 항목(2026-11-24): WBD 2026-10-06(인수 종결·Nasdaq 상장폐지. 10-06 봉은 거래량 0의 평봉, S&P 자리는 TWLO), KVUE 2026-11-02(인수 종결·개장 전 거래 정지, NYSE 상장폐지 11-12 예정, S&P 자리는 11-04부터 OKTA).
 - 갱신 주기: 마지막 갱신 후 7일(`UNIVERSE_MAX_AGE_DAYS`)이 지나면 실행합니다. NASDAQ 목록(`config/symbols.txt`)이 없거나 비어 있으면 기간과 상관없이 바로 갱신합니다(`--skip-catalog` 제외). 갱신 이유는 결과 JSON의 `reason`에 남습니다.
 - `--dry-run`은 네트워크 없이 갱신이 필요한지만 보고하고, `--check`는 실제로 받아 비교하되 파일은 쓰지 않습니다.
 - 표기: Twelve Data와 Finnhub 모두 `BRK.B`, `BF.B` 점 표기를 씁니다. yfinance 표기(`BRK-B`)는 `symbol_status.yahoo_symbol`로 제공합니다.
@@ -91,7 +97,7 @@
 ### 순환 종목 수집
 
 - 순서: 한 번도 성공하지 못한 종목 → `last_success_date`가 오래된 순 → `symbols.txt` 순서.
-- 제외: 핵심 종목, `delisted`, 재시도 대기(`next_retry_date`)가 남은 종목.
+- 제외: 핵심 종목, `delisted`, `config/core_exclude.txt`(NASDAQ 목록·옛 구성종목에 있어도), 재시도 대기(`next_retry_date`)가 남은 종목.
 - 실패: HTTP 404/종목 없음은 `not_found`로 30일 대기. 그 밖의 오류는 연속 실패 횟수에 따라 1·2·4·8·16·30일 대기. 성공하면 초기화합니다.
 - 4xx 응답(429 제외)은 같은 요청을 바로 다시 보내지 않습니다.
 - 예산이 떨어져 못 받은 종목은 실패로 치지 않습니다.
@@ -118,7 +124,7 @@
   - 실행 요약에 단계별 `dropped_bars`·`patched`·`vanished_dates`, 종목별 `dropped`·`patched`·`patch_skipped`·`vanished_dates`가 남습니다. 추가 API 호출은 없습니다.
 - 이미 저장된 행은 `src.ohlcv_cleanup`(파이프라인 잠금, `--dry-run`은 개수만)이 같은 규칙으로 정리합니다. 휴장일 행과 시작일 이전 행을 한 트랜잭션에서 지우고, 영향받은 종목의 `indicators` 행을 모두 지워 다음 지표 단계가 다시 계산하게 합니다. 핵심 종목은 다음 실행, 순환 종목은 다음 차례에 저절로 정리되지만 상장폐지 종목은 다시 받지 않으므로 필요합니다. 보정 봉은 넣지 않습니다(다음 수집에서 들어감).
 - 값 정규화(스키마 버전 4): 저장 전에 Python에서 봉을 검사합니다. 날짜는 `YYYY-MM-DD` 달력 날짜, open/high/low/close는 유한한 실수(빠지면 오류), volume은 0 이상의 정수(`"12345"`, `12345.0`은 허용, `1.5`는 오류, 빈 값은 NULL, 0은 0으로 보존), `adj_close`는 유한한 실수 또는 NULL입니다. 응답에 이상 값이 하나라도 있으면 그 종목만 실패(`ValueError`)로 처리해 기존 실패·재시도 흐름을 타고, 저장된 행은 바뀌지 않습니다. NDJSON에는 JSON 숫자로 쓰고 `read_json`이 테이블 타입으로 읽으므로, 정규화를 빠져나간 `""`·`"abc"`·잘못된 날짜도 DB에 들어가지 않고 오류가 납니다.
-- `delisted` 종목은 다시 받지 않으므로 행이 보존됩니다.
+- `delisted` 종목과 `config/core_exclude.txt` 종목은 다시 받지 않으므로 행이 보존됩니다.
 - dry-run은 `state.json`, `finnhub_news.json`, DB에 아무것도 쓰지 않습니다.
 - 원본 응답은 매일 5000행 전체를 다시 받으므로 응답마다 새 파일을 만들면 하루 1GB가 넘게 쌓입니다. 그래서 `data/raw/twelve_data/{splits,all,none}/<symbol>.json.gz`처럼 종목·조정 방식별 최신 1개만 gzip으로 덮어씁니다(약 0.6GB에서 멈춤). FRED, Finnhub도 같은 방식입니다. 2026-10-20 이전에 응답마다 만든 타임스탬프 파일(`data/raw/twelve_data/<symbol>_<UTC 시각>.json`, 5,301개·1.94GB, 2026-05-20~06-25)은 `data/raw/archive/twelve_data_legacy_pre_20261020.tar.gz`(190MB) 하나로 압축 보관합니다(2026-11-24). 압축 안의 경로가 `twelve_data/<파일 이름>`이라 `data/raw`에서 풀면 원래 자리로 돌아오고, 같은 폴더의 `twelve_data_legacy_pre_20261020.files.sha256`(파일별 SHA-256, `data/raw`에서 `sha256sum -c`)과 `.tar.gz.sha256`(압축 파일)으로 확인합니다. 같은 데이터가 DB에 있고 이 파일들을 읽는 코드는 없습니다. 원본은 압축과 대조한 뒤 사용자 확인을 받아 지웁니다. `data/raw/fred/`의 같은 시기 타임스탬프 파일 11개(9.5MB)는 아직 그대로 둡니다.
 - `--only SYMBOL`로 두 단계를 특정 종목에 한정할 수 있습니다(점검, 문제 종목 재수집).
@@ -133,20 +139,22 @@
   - 다음 실행이 그 봉을 다시 받아 고칩니다. 아직 다시 받지 않은 마지막 봉은 스냅숏의 `bar_status`가 표시합니다(5절).
 - 검증(`src.validate_duckdb`)은 `issues`(중복 날짜, 잘못된 값)가 있을 때만 `fail`입니다. 데이터 규칙 점검은 `warnings`로 남기고 상태를 바꾸지 않습니다.
   - `core_gap`: 핵심 종목(활성 core_etf·core_sp500·core_extra)의 첫 봉(시작일이 더 늦으면 시작일)부터 마지막 봉(최근 `collection_runs.session_date`를 넘지 않음)까지의 거래일 중 봉이 없는 날. 알려진 빈칸과 보정 날짜는 뺍니다. 저장된 적 없는 빈칸도 잡힙니다.
-  - `core_stale`: 마지막 봉이 그 기준 거래일보다 이른 핵심 종목, 봉이 없는 핵심 종목.
+  - `core_stale`: 마지막 봉이 그 기준 거래일보다 이른 핵심 종목, 봉이 없는 핵심 종목. 제외 종목은 `active=false`라 들어가지 않습니다.
+  - `core_exclude_active`: `config/core_exclude.txt` 종목 중 실제로 정체가 아닌 것. 제외일 뒤의 봉이 있거나, 마지막 봉이 `core_stale`과 같은 기준 거래일 이상입니다. 제외 종목은 다시 받지 않으므로 줄이 틀렸으면(예: 오타로 살아 있는 종목을 뺌) 고칠 때까지 매일 남습니다. 제외일 당일에 넣은 줄의 그날 봉처럼 저장된 봉으로 구분할 수 없는 경우는 잡지 못합니다.
   - `closed_day_bars`(전체 종목 개수, 핵심 종목 목록), `before_history_start`, `patch_missing`(보정 파일에 있는데 DB에 없는 봉).
   - 보고서에 `generated_at`과 실행 ID(`DATA_SCRAPPING_RUN_ID`)를 기록합니다. `run_daily.sh`는 검증을 요약보다 먼저 돌리고, 요약은 이번 실행의 보고서일 때만 Discord에 `validation=<status> warnings=<유형:개수>`를, 아니면(dry-run에서 건너뜀, 검증 실패) `validation=N/A`를 씁니다.
 - `collection_runs.status`
 
 | 상태 | 조건 |
 |---|---|
-| `complete` | S&P 500 목록이 적재돼 있고(490개 이상), 핵심 종목 전부가 기준 거래일 봉·`adj_close`·분할 이력을 갖고, FRED 목록 전부가 이번 실행에서 성공 |
+| `complete` | S&P 500 목록이 적재돼 있고(490개 이상, 제외 종목도 셈), 핵심 종목(`config/core_exclude.txt` 제외) 전부가 기준 거래일 봉·`adj_close`·분할 이력을 갖고, FRED 목록 전부가 이번 실행에서 성공 |
 | `partial` | 일부 누락. `missing_symbols`, `missing_splits`, `missing_series`에 목록 기록 |
 | `failed` | 종목 목록이 초기화되지 않았거나(`universe_issue`), 핵심 종목이 하나도 성공하지 못함 |
 
 - 첫 1~2일은 분할 이력 보충(526크레딧)이 실행당 상한에 걸려 `partial`이 정상입니다.
 
 - `partial`이어도 스냅숏은 만들고 상태를 함께 기록합니다.
+- `core_expected`·`core_ok`·`splits_ok`의 분모는 제외 종목을 뺀 핵심 종목 수입니다(2026-11-24부터. 526 → 524, WBD·KVUE). `complete`의 뜻("`core_expected` 전부가 기준 거래일 봉을 가짐")은 그대로이고 분모만 바뀝니다. 이미 기록된 행은 바뀌지 않습니다.
 
 ## 5. 스냅숏과 stockpred 데이터 계약
 
@@ -186,6 +194,8 @@ SELECT p.* FROM prices_daily p
 LEFT JOIN bar_status b ON b.symbol = p.symbol AND b.last_bar_date = p.date AND b.provisional
 WHERE b.symbol IS NULL;
 ```
+- `symbol_status.active`는 다시 요청하지 않는 종목에서 `false`입니다. `delisted_at`은 카탈로그 상장폐지면 표시한 시각(ISO UTC 시각), `config/core_exclude.txt` 제외면 제외일(`YYYY-MM-DD`)입니다(2026-11-24). `group_name`은 그 종목이 있는 목록(`core_sp500` 등) 그대로라 값 종류는 늘지 않습니다. 핵심 종목만 고르려면 `active`도 함께 봅니다(`src.validate_duckdb`처럼 `active AND group_name IN (...)`). 제외 종목의 `prices_daily` 행은 남아 있고 더 늘지 않습니다.
+- 2026-11-24 핵심 제외로 stockpred가 보는 변화: `collection_runs.core_expected`가 526에서 524로 줄고 WBD·KVUE가 `missing_symbols`에서 빠집니다. PSKY만 남으면 `partial`이고, PSKY를 정리하면 `complete`가 가능해집니다. 테이블·뷰의 열과 `prices_daily`의 뜻은 그대로입니다.
 - 데이터 규칙(3절, 2026-10-23)으로 컬럼 이름·의미는 그대로이고 행만 바뀝니다. 휴장일 봉과 시작일 이전 행이 빠지고(운영 반영 때 3,347행: 휴장일 2,956행, GM 2010-11-18 이전 391행), 보정 봉이 들어갑니다(MNST 2026-08-10). stockpred는 벤치마크 거래일로 맞추므로 휴장일 봉은 원래 쓰지 않았고, 달라지는 것은 GM·MNST이며 둘 다 Yahoo와 같아지는 방향입니다.
 
 - Yahoo 캐시와 대조(2026-10-20, NVDA·BRK.B·SPY 5000행): close 일치(오차 5e-8 이하), volume 99% 구간 일치, 최근 2년 배당 조정계수 차이 0.007% 이하.
@@ -206,7 +216,7 @@ WHERE b.symbol IS NULL;
 ## 6. 뉴스 (Finnhub)
 
 - 분당 50회(`FINNHUB_PER_MINUTE`), 한도는 응답 헤더 기준 분당 60입니다. 하루 한도는 없습니다.
-- 대상: 핵심 종목은 매 실행, 나머지 활성 종목은 아래 0건 간격으로 조회일이 된 것만입니다. 핵심 종목 먼저 처리합니다. `FINNHUB_LIMIT`이 비어 있으면 대상 전체입니다.
+- 대상: 핵심 종목은 매 실행, 나머지 활성 종목은 아래 0건 간격으로 조회일이 된 것만입니다. 핵심 종목 먼저 처리합니다. `FINNHUB_LIMIT`이 비어 있으면 대상 전체입니다. 활성 종목은 `delisted`와 `config/core_exclude.txt`를 뺀 NASDAQ 목록·옛 구성종목입니다(`--symbol`로 직접 지정하면 받습니다).
 - 한 번에 약 250건에서 잘립니다(MSFT 1년 요청 → 최근 1주 250건). 200건 이상이고 가장 오래된 기사가 시작일보다 늦으면 `to`를 가장 오래된 기사 날짜로 당겨 다시 요청합니다. 하루에 250건이 넘으면 하루를 당깁니다.
 - 종목당 실행마다 최대 10페이지. 다 못 받으면 `window_from`, `window_to`, `cursor_to`를 저장해 다음 실행에서 이어 받습니다. `last_to`는 구간을 끝까지 받은 뒤에만 갱신합니다.
 - 첫 수집은 365일 전부터(`FINNHUB_DAYS_BACK`, 무료 범위 약 1년)입니다.
@@ -260,7 +270,7 @@ WHERE b.symbol IS NULL;
 ## 10. 운영하며 확인할 것
 
 - ~~16:10 ET에 그날 일봉(거래량 포함)이 확정돼 있는지.~~ 확정돼 있지 않음(2026-11-24, 4절). 남은 확인: 01:10 UTC 타이머 실행이 받은 기준 거래일 봉이 다음 날 값과 얼마나 다른지, 평일 EOD 값이 들어오는 시각(선택 측정, 실제 API).
-- S&P 공개 목록의 반영 지연(2026-10-20 기준 마지막 변경 2026-08-18).
+- S&P 공개 목록의 반영 지연(2026-10-20 기준 마지막 변경 2026-08-18, 2026-11-24에도 그대로). 목록이 WBD·KVUE를 빼면 "제외 줄 삭제 가능" INFO가 나오는지, 새 구성종목(TWLO·OKTA)이 들어오는지.
 - Finnhub 잘림 기준 200건.
 - Twelve Data 실행당 1,800크레딧·분당 7회, Finnhub 분당 50회에서 오류가 나는지.
 - 겨울(표준시)에 전날 실행이 UTC 자정 뒤에 쓴 크레딧 때문에 핵심 단계가 키 예산에 막히지 않는지. 타이머를 01:10 UTC로 옮긴 뒤에는 손으로 늦게 시작한 실행에서만 생깁니다(3절).

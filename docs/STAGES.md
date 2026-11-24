@@ -193,6 +193,38 @@
 - [ ] `fred/` 옛 타임스탬프 파일 11개(9.5MB)를 보관 범위에 넣을지 결정
 - 상태 파일·DB·API 호출·스냅숏 계약 변화 없음. 되돌리기: `data/raw`에서 `tar -xzf archive/twelve_data_legacy_pre_20261020.tar.gz` 뒤 `sha256sum -c archive/twelve_data_legacy_pre_20261020.files.sha256`
 
+## 2026-11-24 핵심 제외 파일 `config/core_exclude.txt` (`docs/DESIGN.md` 1·3·4·5·6절)
+- [x] 배경(조사 세션, 읽기 전용): WBD(10-06 인수 종결·상장폐지), KVUE(11-02 인수 종결·거래 정지), PSKY(티커 SKYD로 변경·NYSE 이전)는 Twelve Data 마지막 봉이 멈췄는데도 매일 2크레딧씩 다시 받았습니다. 그래서 `collection_runs`가 2026-10-20부터 계속 `partial`이었습니다. 원인은 세 가지입니다. S&P 공개 목록이 11주째 갱신되지 않았고, `Universe.core_symbols()`가 `delisted`를 거르지 않으며, `relisted` 처리가 카탈로그에 남은 심볼의 표시를 지웁니다. 조사 세션 권장안 B를 구현했습니다. DB 스키마·상태 파일 형식·재구성은 바뀌지 않습니다.
+- [x] `src.data_rules.load_core_exclusions`: `SYMBOL YYYY-MM-DD 이유`(주석, git 추적). 날짜는 거래가 끝난 날로, 오늘(UTC) 이하의 달력 날짜면 되고 거래일이 아니어도 됩니다. 형식·날짜·기호·중복·미래 날짜 오류는 `DataRulesError`입니다. `load_data_rules`도 읽으므로 `src.main`은 `/api_usage`보다 먼저 멈춥니다(dry-run 포함).
+- [x] `src.universe`: `Universe.excluded`, `core_symbols()`에서 제외, `rotation_symbols()`·`inactive_symbols()`(WBD·PSKY처럼 NASDAQ 목록에 있어도 순환에 안 들어감), `all_symbols()`는 핵심 목록 원본으로 만들어 제외 종목도 `symbol_status` 행을 유지, `removable_exclusions()`(S&P 목록 490개 이상일 때만). `core_extra.txt`와 겹치면 `DataRulesError`. 갱신 결과 JSON에 `core_excluded`·`core_exclude_removable`, dry-run에 `core_excluded`
+- [x] `src.main`: 순환 제외 집합에 제외 종목 추가, 실행 요약 `core_exclude`(`symbols`, `removable`), 핵심 단계에서 "제외 줄 삭제 가능" INFO(줄을 지우면 순환으로 돌아가는 경우 그 사실도), `--only`로 제외 종목을 지정하면 "Not collecting" INFO
+- [x] `src.snapshot`: `symbol_status`에서 제외 종목은 `active=false`·`delisted_at`=제외일, `group_name`은 원래 그룹. `evaluate_completion`은 `core_symbols()`를 그대로 써서 `core_expected`에서 빠짐
+- [x] `src.finnhub_news`: 활성 종목에서 제외 종목을 뺌(우선순위 핵심 목록은 이미 제외)
+- [x] `src.validate_duckdb`: 경고 `core_exclude_active`(제외일 뒤의 봉이 있거나 마지막 봉이 최근 기준 거래일 이상, 즉 실제로 정체가 아님)
+- [x] `src.main`·`src.universe`·`src.snapshot`·`src.finnhub_news`는 파일이 잘못되면 `{"status": "data_rules_invalid"}`·종료 코드 1로 API 호출 없이 끝냄
+- [x] 첫 줄: WBD 2026-10-06, KVUE 2026-11-02. 운영 상태 파일 사본으로 worktree dry-run을 돌린 결과입니다(API 호출 없음, 사본 무변경).
+  - 핵심 526 → 524, 순환 풀 4,375(WBD 빠짐), 뉴스 대상 4,899(WBD·KVUE 빠짐).
+  - S&P 목록에 둘 다 남아 있어 "삭제 가능" INFO는 없습니다.
+  - 운영 스냅숏 기준으로 검증하면 `core_exclude_active` 0건입니다. WBD 마지막 봉 10-06 = 제외일이고, KVUE는 10-30입니다.
+- [x] 테스트 14개 추가(`tests/test_core_exclude.py`, 전체 163개)
+  - 저장소 파일 로드, 잘못된 줄 6종, 달력 날짜 허용.
+  - 핵심·순환·뉴스 제외, `all_symbols` 유지, 삭제 가능 판정과 목록 미적재 시 생략, `core_extra` 충돌.
+  - 완료 판정 `partial` → `complete`, 스냅숏 `symbol_status`·행 보존.
+  - dry-run 계획·INFO 로그·`--only`.
+  - CLI 4개가 잘못된 파일에서 API 없이 종료.
+  - `core_exclude_active`: 오타로 뺀 살아 있는 종목, 제외일 당일 최신 봉.
+  - compileall, `bash -n`, worktree `DRY_RUN=1 scripts/run_daily.sh` 실패 단계 없음.
+- stockpred 영향: `collection_runs.core_expected` 분모가 526 → 524로 줄고 WBD·KVUE가 `missing_symbols`에서 빠집니다. `complete`의 뜻은 그대로입니다. `symbol_status`에서 두 종목이 `active=false`가 되고 `delisted_at`에 날짜 문자열(`YYYY-MM-DD`)이 들어갑니다. 카탈로그 상장폐지는 ISO 시각입니다. `prices_daily` 행은 남습니다. 열·뷰는 그대로입니다. `compare_snapshot_yahoo.py`처럼 `group_name LIKE 'core%'`만 보는 쪽은 `active`도 봐야 제외 종목이 빠집니다.
+- [ ] PSKY 처리(실제 API, 사용자 승인 필요). SKYD가 PSKY 이력을 이어서 주는지 확인해야 합니다.
+  - SKYD는 NYSE 종목이라 NASDAQ 목록에 없습니다. 그래서 `--only SKYD`만으로는 아무것도 받지 않습니다.
+  - 확인하려면 `config/core_extra.txt`에 SKYD를 넣은 뒤 `src.main --phase core --only SKYD`를 실행합니다.
+  - 비용은 `splits`·`all` 2크레딧, 분할 이력 `none` 1크레딧, `/api_usage` 키 3개 3크레딧입니다(`--no-usage-sync`면 3크레딧).
+  - 이어 준다면 `PSKY 2026-10-16 ...`를 제외 파일에 넣습니다. 10-06으로 쓰면 10-07~10-16 봉 때문에 `core_exclude_active`가 남습니다.
+  - 이어 주지 않으면 stockpred 쪽 PSKY → SKYD 매핑이 필요합니다.
+- [ ] 제안: S&P 새 구성종목 TWLO(10-06~, DB에 행 0)·OKTA(11-04~, 순환 종목)를 `config/core_extra.txt`에 넣기(사용자 결정). 핵심 1종목은 하루 2크레딧이고, 처음에는 분할 이력 1크레딧이 더 듭니다. 공개 목록이 따라오면 중복은 무해합니다.
+- [ ] 운영 반영(사용자 확인 뒤): 운영 폴더 `main`이 차분 저장 병합 브랜치(ab38ed1)로 앞당겨진 뒤 이 브랜치를 fast-forward. 다음 실행의 `collection_runs`에서 `core_expected` 524, `missing_symbols`에 PSKY만 남는지 확인
+- 범위 밖: `core_symbols()`가 `delisted`를 거르게 바꾸는 것과 `relisted` 처리 수정(방안 A·C), S&P 목록 지연 자동 대응
+
 ## 이전 다음 작업
 - [x] run_daily.sh에 DuckDB 검증 단계 포함
 - [x] Pi 배포 스크립트(install_pi.sh) 및 배포 가이드(DEPLOYMENT.md) 추가 → 2026-10-20 `install_local.sh`로 교체
@@ -201,7 +233,7 @@
 - [ ] 운영 중 축적 데이터 기준으로 검증 규칙(무결성/중복/이상치) 확장
 - [x] 16:10 ET 직후 당일 일봉(거래량 포함) 확정 여부 확인, 필요하면 시작 시각 조정 → 확정 아님. 2026-11-24 절(`bar_status`, 타이머 01:10 UTC)
 - [ ] 운영 수치 조정: 실행당 1,800크레딧·분당 7회(Twelve Data), 분당 50회·잘림 기준 200건(Finnhub)
-- [ ] S&P 공개 목록 반영 지연 모니터링(필요하면 `config/core_extra.txt` 사용)
+- [ ] S&P 공개 목록 반영 지연 모니터링(필요하면 `config/core_extra.txt` 사용, 끝난 구성종목은 `config/core_exclude.txt`. 2026-11-24 기준 11주째 갱신 없음)
 - [ ] rclone 백업 설정 후 백업 타이머 켜기
 - [ ] 상장폐지 종목 데이터 확보 검토(현재 심볼 목록 기준이라 생존 편향 존재; 2026-10-20부터는 상장폐지 종목 행을 보존)
 - [ ] FRED 최초 발표값(ALFRED vintage) 기반 거시지표 시점 정렬 검토(`first_seen_at`은 2026-10-20 이후 관측값부터 기록)

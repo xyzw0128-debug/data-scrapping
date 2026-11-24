@@ -8,6 +8,9 @@
   provider response lacks that date and has the reference day. Prices are kept with the close
   of a reference day on the same split basis, so a later split rescales them.
 - ``config/known_gaps.txt``: trading days no source can fill; validation does not warn about them.
+- ``config/core_exclude.txt``: core symbols a person took out of collection because their trading
+  ended or their ticker changed while the public S&P 500 list still has them. src.universe
+  leaves them out of core, rotation and news; validation warns when one is not actually stale.
 
 ``load_data_rules`` runs before any paid call; a malformed line raises DataRulesError.
 """
@@ -19,7 +22,7 @@ import math
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +32,7 @@ from src.market_calendar import is_trading_day
 HISTORY_START_FILE = "history_start.txt"
 BAR_PATCHES_FILE = "bar_patches.csv"
 KNOWN_GAPS_FILE = "known_gaps.txt"
+CORE_EXCLUDE_FILE = "core_exclude.txt"
 PATCH_COLUMNS = ["symbol", "date", "open", "high", "low", "close", "volume", "ref_date", "ref_close", "source", "note"]
 # A reference close this far from the recorded one means a new split; smaller differences are
 # vendor rounding and leave the recorded values untouched.
@@ -68,10 +72,23 @@ class BarPatch:
 
 
 @dataclass(frozen=True)
+class CoreExclusion:
+    """A core symbol taken out of collection by hand (``config/core_exclude.txt``).
+
+    ``date`` is the day its trading ended or its ticker changed: no bar after it is expected.
+    """
+
+    symbol: str
+    date: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class DataRules:
     history_start: dict[str, str] = field(default_factory=dict)
     patches: dict[str, tuple[BarPatch, ...]] = field(default_factory=dict)
     known_gaps: frozenset[tuple[str, str]] = frozenset()
+    core_exclude: dict[str, CoreExclusion] = field(default_factory=dict)
 
     def keep_bar(self, symbol: str, day: str) -> bool:
         return is_trading_day(date.fromisoformat(day)) and day >= self.history_start.get(symbol, "")
@@ -158,17 +175,21 @@ def _symbol(value: str, path: Path, line_no: int) -> str:
     return symbol
 
 
-def _trading_date(value: str, path: Path, line_no: int, what: str = "date") -> str:
+def _calendar_date(value: str, path: Path, line_no: int, what: str = "date") -> date:
     text = value.strip()
     try:
         if not _DATE_RE.fullmatch(text):
             raise ValueError
-        day = date.fromisoformat(text)
+        return date.fromisoformat(text)
     except ValueError:
         raise _fail(path, line_no, f"invalid {what} {value!r} (YYYY-MM-DD)") from None
+
+
+def _trading_date(value: str, path: Path, line_no: int, what: str = "date") -> str:
+    day = _calendar_date(value, path, line_no, what)
     if not is_trading_day(day):
-        raise _fail(path, line_no, f"{what} {text} is not a trading day")
-    return text
+        raise _fail(path, line_no, f"{what} {day.isoformat()} is not a trading day")
+    return day.isoformat()
 
 
 def _positive(value: str, column: str, path: Path, line_no: int) -> float:
@@ -187,15 +208,20 @@ def _content_lines(path: Path) -> list[tuple[int, str]]:
     return [(no, line) for no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1) if line.strip() and not line.lstrip().startswith("#")]
 
 
-def _dated_entries(path: Path) -> list[tuple[int, str, str]]:
-    """``SYMBOL YYYY-MM-DD reason`` lines as (line number, symbol, date); the reason is required."""
-    entries = []
+def _dated_lines(path: Path) -> list[tuple[int, list[str]]]:
+    """``SYMBOL YYYY-MM-DD reason`` lines as (line number, [symbol, date, reason]); the reason is required."""
+    lines = []
     for line_no, line in _content_lines(path):
         parts = line.split(maxsplit=2)
         if len(parts) < 3:
             raise _fail(path, line_no, "expected 'SYMBOL YYYY-MM-DD reason'")
-        entries.append((line_no, _symbol(parts[0], path, line_no), _trading_date(parts[1], path, line_no)))
-    return entries
+        lines.append((line_no, parts))
+    return lines
+
+
+def _dated_entries(path: Path) -> list[tuple[int, str, str]]:
+    """Dated lines whose date is a trading day, as (line number, symbol, date)."""
+    return [(line_no, _symbol(parts[0], path, line_no), _trading_date(parts[1], path, line_no)) for line_no, parts in _dated_lines(path)]
 
 
 def _load_history_start(path: Path) -> dict[str, str]:
@@ -256,8 +282,28 @@ def _load_patches(path: Path) -> list[BarPatch]:
     return patches
 
 
+def load_core_exclusions(config_dir: Path, today: date | None = None) -> dict[str, CoreExclusion]:
+    """``config/core_exclude.txt`` lines (a missing file means no exclusions).
+
+    The date may be any calendar day up to today (UTC): the day trading ended or the ticker
+    changed, which need not be a session (an acquisition can close before the open).
+    """
+    path = config_dir / CORE_EXCLUDE_FILE
+    latest = today or datetime.now(UTC).date()
+    exclusions: dict[str, CoreExclusion] = {}
+    for line_no, (raw_symbol, raw_date, reason) in _dated_lines(path):
+        symbol = _symbol(raw_symbol, path, line_no)
+        day = _calendar_date(raw_date, path, line_no)
+        if day > latest:
+            raise _fail(path, line_no, f"date {day.isoformat()} is in the future (the day trading ended, not a planned one)")
+        if symbol in exclusions:
+            raise _fail(path, line_no, f"{symbol} is listed twice")
+        exclusions[symbol] = CoreExclusion(symbol=symbol, date=day.isoformat(), reason=reason.strip())
+    return exclusions
+
+
 def load_data_rules(config_dir: Path) -> DataRules:
-    """Read and check the three rule files (a missing file means no rules of that kind)."""
+    """Read and check the rule files (a missing file means no rules of that kind)."""
     history_start = _load_history_start(config_dir / HISTORY_START_FILE)
     known_gaps = _load_known_gaps(config_dir / KNOWN_GAPS_FILE)
     patches = _load_patches(config_dir / BAR_PATCHES_FILE)
@@ -276,4 +322,5 @@ def load_data_rules(config_dir: Path) -> DataRules:
         history_start=history_start,
         patches={symbol: tuple(sorted(items, key=lambda p: p.date)) for symbol, items in by_symbol.items()},
         known_gaps=frozenset(known_gaps),
+        core_exclude=load_core_exclusions(config_dir),
     )

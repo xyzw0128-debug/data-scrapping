@@ -29,6 +29,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from src.config import load_symbols
+from src.data_rules import DataRulesError
 from src.env import load_project_env
 from src.lock import LockHeldError, lock_held_exit, pipeline_lock
 from src.rate_limit import PerMinuteRateLimiter
@@ -246,7 +247,8 @@ def universe_news_selection(
     or with a schedule of only 1-day waits, nothing is left out.
     """
     core = universe.core_symbols()
-    active = [s for s in [*universe.nasdaq, *sorted(universe.former_core)] if s not in universe.delisted]
+    inactive = universe.inactive_symbols()  # delisted marks and config/core_exclude.txt
+    active = [s for s in [*universe.nasdaq, *sorted(universe.former_core)] if s not in inactive]
     waiting: list[str] = []
     if check_day is not None and max(backoff_days) > 1:
         active, waiting = split_due_symbols(active, news_state, check_day, backoff_days, always=core)
@@ -459,6 +461,9 @@ def main() -> int:
             summary = run(args)
     except LockHeldError as exc:
         return lock_held_exit(exc)
+    except DataRulesError as exc:  # config/core_exclude.txt, read with the universe before any call
+        print(json.dumps({"status": "data_rules_invalid", "error": str(exc)}, ensure_ascii=False))
+        return 1
     printable = {**summary, "symbols": [s for s in summary["symbols"] if s["status"] == "failed"][:50]}
     print(json.dumps(printable, ensure_ascii=False, indent=2, sort_keys=True))
     return 1 if summary["failed"] else 0

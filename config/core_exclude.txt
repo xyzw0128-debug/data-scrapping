@@ -1,0 +1,11 @@
+# Core symbols taken out of collection by hand: SYMBOL YYYY-MM-DD reason (src.universe).
+# For a symbol whose trading ended (acquisition, delisting) or whose ticker changed while the
+# public S&P 500 list (or core_etfs.txt) still has it. YYYY-MM-DD is the day trading ended or the
+# change took effect, not later than today; bars after it are not expected.
+# The symbol leaves core, rotation and news, and core_expected; its stored rows stay, and
+# symbol_status shows active=false with this date as delisted_at. A malformed line, or a symbol
+# also in core_extra.txt, stops collection before any API call. src.main logs when no core list
+# has the symbol any more (the line can go); src.validate_duckdb warns (core_exclude_active)
+# when the symbol has bars after the date or for the latest session.
+WBD 2026-10-06 acquisition by Paramount Skydance closed, delisted from Nasdaq; Twelve Data's 10-06 bar is flat with volume 0 (last trade 10-05); S&P 500 replaced it with TWLO on 10-06
+KVUE 2026-11-02 acquisition by Kimberly-Clark closed, trading halted before the open (NYSE delisting set for 11-12); S&P 500 replaced it with OKTA on 11-04

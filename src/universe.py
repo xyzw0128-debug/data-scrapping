@@ -1,10 +1,14 @@
 """Symbol universe: core symbols collected daily, rotation pool, and delisted marks.
 
-Core = config/core_etfs.txt + current S&P 500 members + optional config/core_extra.txt.
+Core = config/core_etfs.txt + current S&P 500 members + optional config/core_extra.txt,
+minus config/core_exclude.txt.
 S&P 500 membership comes from the same public CSV stockpred uses (fja05680/sp500), so
 both programs agree on the universe. Members that leave the index move to ``former_core``
 and keep being collected in rotation. Symbols absent from Twelve Data's US stock and ETF
 catalogs are marked delisted: they are no longer requested, and their rows are kept.
+The public list can lag the index by weeks and Twelve Data keeps dead tickers in its catalogs,
+so a person lists core symbols whose trading ended (or whose ticker changed) in
+config/core_exclude.txt: they leave core, rotation and news, and their rows are kept.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from urllib.request import Request, urlopen
 from src.atomic_io import atomic_write_json, atomic_write_text
 from src.catalog import atomic_write_symbols, extract_symbols
 from src.config import load_provider_config, load_symbols
+from src.data_rules import CORE_EXCLUDE_FILE, CoreExclusion, DataRulesError, load_core_exclusions
 from src.env import load_project_env
 from src.lock import LockHeldError, lock_held_exit, pipeline_lock
 from src.state import load_state, utc_now_iso
@@ -74,9 +79,26 @@ class Universe:
     former_core: dict[str, dict] = field(default_factory=dict)
     delisted: dict[str, dict] = field(default_factory=dict)
     refreshed_at: str | None = None
+    excluded: dict[str, CoreExclusion] = field(default_factory=dict)
 
     def core_symbols(self) -> list[str]:
-        return list(dict.fromkeys([*self.etfs, *self.sp500, *self.extra]))
+        """The core lists minus config/core_exclude.txt."""
+        return [s for s in dict.fromkeys([*self.etfs, *self.sp500, *self.extra]) if s not in self.excluded]
+
+    def inactive_symbols(self) -> set[str]:
+        """Symbols never requested: delisted marks and config/core_exclude.txt."""
+        return set(self.delisted) | set(self.excluded)
+
+    def removable_exclusions(self) -> list[str]:
+        """Excluded symbols that no core list has any more: their exclusion line can go.
+
+        Empty while the S&P 500 list is not loaded (fewer than MIN_SP500_MEMBERS), when every
+        member would look removed.
+        """
+        if len(self.sp500) < MIN_SP500_MEMBERS:
+            return []
+        listed = {*self.etfs, *self.sp500, *self.extra}
+        return sorted(s for s in self.excluded if s not in listed)
 
     def group_of(self, symbol: str) -> str:
         if symbol in self.etfs:
@@ -90,13 +112,14 @@ class Universe:
         return "rotation"
 
     def rotation_symbols(self) -> list[str]:
-        """NASDAQ list plus former core members, minus core and delisted symbols."""
-        core = set(self.core_symbols())
+        """NASDAQ list plus former core members, minus core, delisted and excluded symbols."""
+        skip = set(self.core_symbols()) | self.inactive_symbols()
         pool = [*self.nasdaq, *sorted(self.former_core)]
-        return [s for s in dict.fromkeys(pool) if s not in core and s not in self.delisted]
+        return [s for s in dict.fromkeys(pool) if s not in skip]
 
     def all_symbols(self) -> list[str]:
-        return list(dict.fromkeys([*self.core_symbols(), *self.nasdaq, *sorted(self.former_core), *sorted(self.delisted)]))
+        """Every listed symbol, excluded core symbols included (they keep a symbol_status row)."""
+        return list(dict.fromkeys([*self.etfs, *self.sp500, *self.extra, *self.nasdaq, *sorted(self.former_core), *sorted(self.delisted)]))
 
 
 def parse_sp500_history(text: str) -> list[tuple[str, list[str]]]:
@@ -127,7 +150,11 @@ def recent_removals(history: list[tuple[str, list[str]]], days: int) -> dict[str
 
 
 def load_universe(data_dir: Path, config_dir: Path = ROOT / "config", symbols_path: Path | None = None) -> Universe:
-    """Build the universe from config files and the last refresh (data/state/universe.json)."""
+    """Build the universe from config files and the last refresh (data/state/universe.json).
+
+    A malformed config/core_exclude.txt, or a symbol in both it and core_extra.txt, raises
+    DataRulesError; collectors load the universe before any paid call.
+    """
     saved = {}
     path = universe_path(data_dir)
     if path.exists():
@@ -139,15 +166,21 @@ def load_universe(data_dir: Path, config_dir: Path = ROOT / "config", symbols_pa
         history = parse_sp500_history(sp500_cache_path(data_dir).read_text(encoding="utf-8"))
         if history:
             as_of, members = history[-1]
+    extra = _read_list(config_dir / "core_extra.txt")
+    excluded = load_core_exclusions(config_dir)
+    both = sorted(set(extra) & set(excluded))
+    if both:
+        raise DataRulesError(f"{CORE_EXCLUDE_FILE}: {', '.join(both)} also listed in core_extra.txt; keep one of the lines")
     return Universe(
         etfs=_read_list(config_dir / "core_etfs.txt"),
         sp500=members,
-        extra=_read_list(config_dir / "core_extra.txt"),
+        extra=extra,
         nasdaq=[s for s in _read_list(symbols_path or config_dir / "symbols.txt") if VALID_TICKER.match(s)],
         sp500_as_of=as_of,
         former_core=dict(saved.get("former_core", {})),
         delisted=dict(saved.get("delisted", {})),
         refreshed_at=saved.get("refreshed_at"),
+        excluded=excluded,
     )
 
 
@@ -229,6 +262,8 @@ def refresh_universe(
 
     universe.refreshed_at = utc_now_iso()
     summary["core_count"] = len(universe.core_symbols())
+    summary["core_excluded"] = sorted(universe.excluded)
+    summary["core_exclude_removable"] = universe.removable_exclusions()
     summary["rotation_count"] = len(universe.rotation_symbols())
     if not dry_run:
         atomic_write_text(sp500_cache_path(data_dir), text)
@@ -289,6 +324,7 @@ def main() -> int:
                     "sp500_count": len(universe.sp500),
                     "sp500_as_of": universe.sp500_as_of,
                     "core_count": len(universe.core_symbols()),
+                    "core_excluded": sorted(universe.excluded),
                     "rotation_count": len(universe.rotation_symbols()),
                     "delisted_count": len(universe.delisted),
                 }
@@ -310,6 +346,9 @@ def main() -> int:
                 result = {"status": "checked" if args.check else "refreshed", "reason": reason, **refreshed}
     except LockHeldError as exc:
         return lock_held_exit(exc)
+    except DataRulesError as exc:
+        print(json.dumps({"status": "data_rules_invalid", "error": str(exc)}, ensure_ascii=False))
+        return 1
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 

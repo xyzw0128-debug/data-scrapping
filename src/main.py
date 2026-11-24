@@ -1,10 +1,10 @@
 """Twelve Data daily OHLCV collector: core symbols every session, the rest in rotation.
 
 Phases (``--phase``):
-- core: ETFs + S&P 500 (+ config/core_extra.txt). Each symbol takes adjust=splits and
-  adjust=all full histories and writes only the rows that differ from the stored ones
-  (storage.sync_symbol_prices, one transaction); rows older than the response are kept and
-  rebased. Then symbols without split history (or whose split basis changed) get adjust=none
+- core: ETFs + S&P 500 (+ config/core_extra.txt, minus config/core_exclude.txt). Each symbol
+  takes adjust=splits and adjust=all full histories and writes only the rows that differ from
+  the stored ones (storage.sync_symbol_prices, one transaction); rows older than the response
+  are kept and rebased. Then symbols without split history (or whose split basis changed) get adjust=none
   to derive split events.
 - rotation: the NASDAQ list and former core members, never-collected first, then the
   stalest. One adjust=splits call per symbol.
@@ -49,7 +49,7 @@ from src.storage import (
     verify_writable,
 )
 from src.twelve_data import BudgetExhaustedError, SymbolNotFoundError, TwelveDataClient, TwelveDataError
-from src.universe import load_universe
+from src.universe import Universe, load_universe
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -362,6 +362,21 @@ def run_rotation(run: Run, client: TwelveDataClient, pool: list[str], exclude: s
         run.tick(symbol)
 
 
+def report_exclusions(universe: Universe, only: set[str], logger: logging.Logger, core_phase: bool) -> None:
+    """Log --only symbols that config/core_exclude.txt keeps out, and (core phase) lines that can go."""
+    for symbol in sorted(only & set(universe.excluded)):
+        logger.info("Not collecting %s: listed in config/core_exclude.txt (%s)", symbol, universe.excluded[symbol].reason)
+    if not core_phase:
+        return
+    rotation_sources = {*universe.nasdaq, *universe.former_core}
+    for symbol in universe.removable_exclusions():
+        returns = symbol in rotation_sources and symbol not in universe.delisted
+        logger.info(
+            "%s is no longer in the S&P 500 list, core_etfs.txt or core_extra.txt; its line in config/core_exclude.txt can go%s",
+            symbol, " (without it the symbol returns to rotation until Twelve Data's catalog drops it)" if returns else "",
+        )
+
+
 def run_collection(args: argparse.Namespace, logger: logging.Logger) -> dict:
     ensure_data_dirs(args.data_dir)
     verify_writable(args.data_dir)
@@ -409,9 +424,11 @@ def run_collection(args: argparse.Namespace, logger: logging.Logger) -> dict:
         "skipped_rate_limit": 0,
         "credits": {"cap": cap.limit, "used_before": already_used},
         "data_rules": {"history_start": len(rules.history_start), "patches": sum(map(len, rules.patches.values())), "known_gaps": len(rules.known_gaps)},
+        "core_exclude": {"symbols": sorted(universe.excluded), "removable": universe.removable_exclusions()},
         "symbols": [],
     }
     run = Run(args, state, summary, logger, cap, rules)
+    report_exclusions(universe, only, logger, args.phase in ("core", "all"))
     if not args.dry_run and not args.no_usage_sync:
         summary["usage_sync"] = client.sync_usage()
         if not key_pool.active_slots():
@@ -427,7 +444,7 @@ def run_collection(args: argparse.Namespace, logger: logging.Logger) -> dict:
             run_core(run, client, core, session)
         if args.phase in ("rotation", "all"):
             max_symbols = args.max_symbols if args.max_symbols is not None else (config.max_symbols_per_run or None)
-            exclude = set(universe.core_symbols()) | set(universe.delisted)
+            exclude = set(universe.core_symbols()) | universe.inactive_symbols()
             run_rotation(run, client, rotation_pool, exclude, session, max_symbols)
     finally:
         summary["finished_at"] = utc_now_iso()

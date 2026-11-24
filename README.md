@@ -8,7 +8,8 @@ The design, budgets, and the stockpred data contract are in [`docs/DESIGN.md`](d
 
 ## Current scope
 
-- Core universe collected every trading day: 23 ETFs (`config/core_etfs.txt`) + current S&P 500 members + optional `config/core_extra.txt`.
+- Core universe collected every trading day: 23 ETFs (`config/core_etfs.txt`) + current S&P 500 members + optional `config/core_extra.txt`, minus `config/core_exclude.txt`.
+- Core exclusions (`config/core_exclude.txt`, `SYMBOL YYYY-MM-DD reason`): core symbols whose trading ended or whose ticker changed while the public S&P 500 list (weeks behind) still has them. They leave core, rotation, news and `core_expected`; their stored rows stay, and `symbol_status` shows `active=false` with the date as `delisted_at`. A malformed line stops every collector before any API call. The core phase logs when no core list has the symbol any more (the line can go), and validation warns (`core_exclude_active`) when an excluded symbol is not actually stale.
 - Rotation universe collected with the remaining budget: the NASDAQ list (`config/symbols.txt`) plus symbols that left the S&P 500. Never-collected symbols first, then the stalest.
 - Weekly universe refresh (`src.universe`, sooner when the NASDAQ list is missing or empty): S&P 500 membership from the same public CSV stockpred uses, the NASDAQ list from Twelve Data, and delisted marks for symbols absent from Twelve Data's US catalogs (their rows are kept; they are no longer requested).
 - Twelve Data daily OHLCV stored as a per-symbol diff: only new or changed rows are written, and rows older than the 5000-row response are kept and rebased when a split or dividend changes the basis (no row lingers on an old basis). `adj_close` (dividend-adjusted close) for core symbols, and split events derived from raw vs split-adjusted prices.
@@ -32,6 +33,7 @@ The design, budgets, and the stockpred data contract are in [`docs/DESIGN.md`](d
 config/
   bar_patches.csv      ← verified bars missing from Twelve Data (src.data_rules)
   core_etfs.txt        ← core ETFs (tracked)
+  core_exclude.txt     ← core symbols taken out by hand (trading ended, ticker changed)
   core_extra.txt       ← optional extra core symbols (create when needed)
   fred_series.txt
   history_start.txt    ← first valid bar date per symbol (src.data_rules)
@@ -159,7 +161,7 @@ Code at schema version 4 refuses to write to an older `market.db` (`SchemaVersio
 
 ## Operating principle
 
-A successful run does not mean every symbol was collected. A successful run means the collector processed only what was safe for the current provider budget and saved enough state to continue next time. `collection_runs.status` tells readers whether the core universe is complete for the latest session (prices, `adj_close`, split history, FRED); `missing_symbols`, `missing_splits`, `missing_series`, and `universe_issue` say what is missing.
+A successful run does not mean every symbol was collected. A successful run means the collector processed only what was safe for the current provider budget and saved enough state to continue next time. `collection_runs.status` tells readers whether the core universe (minus `config/core_exclude.txt`, so `core_expected` shrinks with each exclusion) is complete for the latest session (prices, `adj_close`, split history, FRED); `missing_symbols`, `missing_splits`, `missing_series`, and `universe_issue` say what is missing.
 
 ## Runtime files
 

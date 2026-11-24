@@ -16,6 +16,7 @@ import shutil
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from src.data_rules import DataRulesError
 from src.env import load_project_env
 from src.lock import LockHeldError, lock_held_exit, pipeline_lock
 from src.market_calendar import expected_session
@@ -76,7 +77,8 @@ def evaluate_completion(
     """Decide complete / partial / failed for the core universe.
 
     complete: the S&P 500 list is loaded, every core symbol has the session bar, adj_close,
-    and its split history, and every FRED series succeeded since ``since``.
+    and its split history, and every FRED series succeeded since ``since``. Core symbols listed
+    in config/core_exclude.txt are not expected (``Universe.core_symbols``).
     failed: the universe is not initialized, or no core symbol has the session bar.
     """
     core = universe.core_symbols()
@@ -115,12 +117,17 @@ def symbol_status_rows(universe: Universe, state: dict, last_bars: dict[str, obj
     for symbol in universe.all_symbols():
         entry = peek_entry(state, symbol, PROVIDER)
         delisted = universe.delisted.get(symbol)
+        excluded = universe.excluded.get(symbol)
+        if excluded is not None:
+            delisted_at = excluded.date  # config/core_exclude.txt: the day trading ended
+        else:
+            delisted_at = delisted.get("marked_at") if delisted else None
         rows.append([
             symbol,
             yahoo_symbol(symbol),
             universe.group_of(symbol),
-            delisted is None,
-            delisted.get("marked_at") if delisted else None,
+            delisted is None and excluded is None,
+            delisted_at,
             last_bars.get(symbol),
             entry.get("last_success_at"),
             entry.get("core_session"),
@@ -235,6 +242,9 @@ def main() -> int:
             result = create_snapshot(args.data_dir, args.config_dir, args.state, args.phase, run_id, started_at, args.note, dry_run=args.dry_run)
     except LockHeldError as exc:
         return lock_held_exit(exc)
+    except DataRulesError as exc:
+        print(json.dumps({"status": "data_rules_invalid", "error": str(exc)}, ensure_ascii=False))
+        return 1
     printable = {
         **result,
         "missing_symbols": result["missing_symbols"][:50],

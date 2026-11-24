@@ -10,6 +10,9 @@ data rules' checks (src.data_rules) and leave the status alone:
 - closed_day_bars: bars on days the NYSE was closed (core symbols listed).
 - before_history_start: bars older than config/history_start.txt allows.
 - patch_missing: a config/bar_patches.csv bar that is not in ohlcv (skipped or not fetched yet).
+- core_exclude_active: a config/core_exclude.txt symbol that is not actually stale: it has bars
+  after its exclusion date, or a bar for the latest collected session (core_stale's reference).
+  Excluded symbols are no longer fetched, so a wrong line keeps warning until it is fixed.
 The report carries generated_at and the pipeline run id, so src.summary shows only this run's
 result.
 """
@@ -144,6 +147,22 @@ def data_rule_warnings(con, rules: DataRules) -> list[dict[str, object]]:
     ).fetchall()
     if missing:
         warnings.append(_warning("patch_missing", [{"symbol": s, "date": d} for s, d in missing]))
+
+    excluded = sorted(rules.core_exclude.values(), key=lambda item: item.symbol)
+    active = con.execute(
+        """
+        WITH ex AS (SELECT unnest(CAST(? AS VARCHAR[])) AS symbol, unnest(CAST(? AS DATE[])) AS exclude_d)
+        SELECT ex.symbol, CAST(ex.exclude_d AS VARCHAR), CAST(max(o.date) AS VARCHAR)
+        FROM ex JOIN ohlcv o USING (symbol)
+        GROUP BY ex.symbol, ex.exclude_d
+        HAVING max(o.date) > ex.exclude_d OR max(o.date) >= CAST(? AS DATE)
+        ORDER BY 1
+        """,
+        [[item.symbol for item in excluded], [item.date for item in excluded], session],
+    ).fetchall()
+    if active:
+        items = [{"symbol": s, "exclude_date": d, "last_bar_date": b} for s, d, b in active]
+        warnings.append(_warning("core_exclude_active", items, session_date=session))
     return warnings
 
 

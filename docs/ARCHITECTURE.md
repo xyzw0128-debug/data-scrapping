@@ -6,7 +6,8 @@
 
 ```text
 config/
-  core_etfs.txt  fred_series.txt  providers.yaml  symbols.txt  symbols.txt.example
+  bar_patches.csv  core_etfs.txt  core_exclude.txt  core_extra.txt(선택)  fred_series.txt  history_start.txt  known_gaps.txt
+  providers.yaml  symbols.txt  symbols.txt.example
 data/
   db/        market.db, market_snapshot.db, market.db.bak-<UTC 날짜>(재구성 전 원본, 최신 2개만 남김)
   logs/      collector.log, runs/, daily/, validation/
@@ -24,7 +25,7 @@ systemd/
 - `src/twelve_data.py`: Twelve Data 클라이언트. 엔드포인트별 크레딧 비용, 오류 분류(분당 한도/일일 소진/종목 없음), 키 전환, `/api_usage` 동기화.
 - `src/rate_limit.py`: `PerMinuteRateLimiter`, 키별 일일 예산(`DailyBudget`), 순차 키 로테이션(`KeyPool`, UTC 날짜 재확인), 실행당 크레딧 상한(`RunCreditCap`).
 - `src/scheduling.py`: 순환 수집 순서(미수집 → 오래된 순)와 실패 재시도 대기(1·2·4·8·16·30일, 404는 30일).
-- `src/universe.py`: 핵심/순환 종목 목록, S&P 500 구성종목(fja05680 CSV), NASDAQ 목록, 상장폐지 표시. `python -m src.universe`로 갱신.
+- `src/universe.py`: 핵심/순환 종목 목록, S&P 500 구성종목(fja05680 CSV), NASDAQ 목록, 상장폐지 표시, 사람이 뺀 핵심 종목(`config/core_exclude.txt`: 핵심·순환·뉴스에서 제외). `python -m src.universe`로 갱신.
 - `src/market_calendar.py`: NYSE 정기 휴장일과 기준 거래일(마지막으로 끝난 정규장) 계산.
 - `src/corporate_actions.py`: `adjust=none`/`adjust=splits` 종가 비율로 분할 이벤트 계산, 분할 기준 변경 감지.
 - `src/snapshot.py`: 완료 판정(`complete/partial/failed`), `symbol_status`·`collection_runs` 기록, 잠정 봉 표시 뷰(`bar_status`), `market_snapshot.db` 원자적 교체.
